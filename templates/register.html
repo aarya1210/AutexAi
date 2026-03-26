@@ -1,0 +1,213 @@
+{% extends "base.html" %}
+{% block title %}Create Account — AutexAI{% endblock %}
+{% block content %}
+<div class="auth-register">
+  <div class="auth-register-card">
+    <h2>{% if session.get('lang')=='hi' %}खाता बनाएं{% elif session.get('lang')=='mr' %}खाते तयार करा{% else %}Create Account{% endif %}</h2>
+    <p>{% if session.get('lang')=='hi' %}AutexAI Care के साथ अपनी यात्रा शुरू करें{% elif session.get('lang')=='mr' %}AutexAI Care सह तुमचा प्रवास सुरू करा{% else %}Begin your journey with AutexAI Care{% endif %}</p>
+
+    <form method="POST" action="{{ url_for('register') }}" class="register-form">
+      <div class="form-row">
+        <div class="form-field">
+          <label class="field-label">{% if session.get('lang')=='hi' %}उपयोगकर्ता नाम{% elif session.get('lang')=='mr' %}वापरकर्ता नाव{% else %}Username{% endif %}</label>
+          <input type="text" name="username" class="field-input-plain" placeholder="yourname" required>
+        </div>
+        <div class="form-field">
+          <label class="field-label">{% if session.get('lang')=='hi' %}ईमेल{% elif session.get('lang')=='mr' %}ईमेल{% else %}Email{% endif %}</label>
+          <input type="email" name="email" class="field-input-plain" placeholder="you@email.com" required>
+        </div>
+      </div>
+
+      <div class="form-row">
+        <div class="form-field">
+          <label class="field-label">{% if session.get('lang')=='hi' %}पासवर्ड{% elif session.get('lang')=='mr' %}पासवर्ड{% else %}Password{% endif %}</label>
+          <input type="password" name="password" class="field-input-plain" placeholder="Min 6 characters" required>
+        </div>
+        <div class="form-field">
+          <label class="field-label">{% if session.get('lang')=='hi' %}पासवर्ड की पुष्टि करें{% elif session.get('lang')=='mr' %}पासवर्ड तपासा{% else %}Confirm Password{% endif %}</label>
+          <input type="password" name="confirm_password" class="field-input-plain" placeholder="Repeat password" required>
+        </div>
+      </div>
+
+      <div class="form-field">
+        <label class="field-label">{% if session.get('lang')=='hi' %}मैं यहाँ हूं{% elif session.get('lang')=='mr' %}मी येथे आहे{% else %}I am a{% endif %}</label>
+        <div class="role-selector">
+          <input type="radio" name="role" value="patient" id="role-patient" class="role-option" checked>
+          <label for="role-patient" class="role-label">
+            <span class="role-icon">👨‍👩‍👧</span>
+            <span class="role-name">{% if session.get('lang')=='hi' %}अभिभावक{% elif session.get('lang')=='mr' %}पालक{% else %}Parent / Guardian{% endif %}</span>
+          </label>
+          <input type="radio" name="role" value="doctor" id="role-doctor" class="role-option">
+          <label for="role-doctor" class="role-label">
+            <span class="role-icon">🩺</span>
+            <span class="role-name">{% if session.get('lang')=='hi' %}डॉक्टर{% elif session.get('lang')=='mr' %}डॉक्टर{% else %}Doctor / Specialist{% endif %}</span>
+          </label>
+        </div>
+      </div>
+
+      <!-- HIPAA Consent Block -->
+      <div class="hipaa-consent-block">
+        <label class="consent-label">
+          <input type="checkbox" name="hipaa_consent" id="hipaaCheck" required class="consent-checkbox">
+          <span class="consent-text">
+            {% if session.get('lang')=='hi' %}
+              मैंने <button type="button" class="hipaa-link-btn" onclick="openHipaaModal()"><strong>HIPAA गोपनीयता नियम</strong></button> पढ़े और मैं सहमत हूं।
+            {% elif session.get('lang')=='mr' %}
+              मी <button type="button" class="hipaa-link-btn" onclick="openHipaaModal()"><strong>HIPAA गोपनीयता नियम</strong></button> वाचले आणि सहमत आहे.
+            {% else %}
+              I have read and agree to the <button type="button" class="hipaa-link-btn" onclick="openHipaaModal()"><strong>HIPAA Privacy Rules</strong></button>.
+            {% endif %}
+          </span>
+        </label>
+        <button type="button" class="hipaa-view-btn" onclick="openHipaaModal()">
+          📋 {% if session.get('lang')=='hi' %}HIPAA नियम देखें{% elif session.get('lang')=='mr' %}HIPAA नियम पहा{% else %}View HIPAA Rules{% endif %}
+        </button>
+      </div>
+
+      <button type="submit" class="btn-auth-primary">
+        {% if session.get('lang')=='hi' %}खाता बनाएं{% elif session.get('lang')=='mr' %}खाते तयार करा{% else %}Create Account{% endif %}
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+      </button>
+    </form>
+
+    <p class="auth-switch">
+      {% if session.get('lang')=='hi' %}पहले से खाता है?{% elif session.get('lang')=='mr' %}आधीच खाते आहे?{% else %}Already have an account?{% endif %}
+      <a href="{{ url_for('login') }}">{% if session.get('lang')=='hi' %}साइन इन करें{% elif session.get('lang')=='mr' %}साइन इन करा{% else %}Sign in{% endif %}</a>
+    </p>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════
+     HIPAA CONSENT MODAL
+     ════════════════════════════════════════════════════════ -->
+<div id="hipaaModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;overflow-y:auto">
+  <div style="background:white;max-width:720px;margin:40px auto;border-radius:16px;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.3)">
+
+    <!-- Header -->
+    <div style="background:linear-gradient(135deg,#4A90D9,#1a5fa8);padding:24px 28px;color:white;display:flex;justify-content:space-between;align-items:center">
+      <div>
+        <h2 style="margin:0;font-size:1.3rem">🔒 HIPAA Privacy Notice</h2>
+        <p style="margin:4px 0 0;opacity:.85;font-size:.9rem">Health Insurance Portability and Accountability Act</p>
+      </div>
+      <button onclick="closeHipaaModal()" style="background:rgba(255,255,255,.2);border:none;color:white;width:36px;height:36px;border-radius:50%;font-size:1.2rem;cursor:pointer">×</button>
+    </div>
+
+    <!-- Content -->
+    <div style="padding:28px;max-height:65vh;overflow-y:auto;font-size:.9rem;line-height:1.7;color:#333">
+
+      <div style="background:#e8f4fd;border-left:4px solid #4A90D9;padding:14px 18px;border-radius:0 8px 8px 0;margin-bottom:20px">
+        <strong>AutexAI Care</strong> is committed to protecting your health information in compliance with the Health Insurance Portability and Accountability Act (HIPAA) of 1996.
+      </div>
+
+      <h3 style="color:#4A90D9;margin:20px 0 8px">1. What Information We Collect</h3>
+      <ul style="margin:0 0 16px;padding-left:20px">
+        <li>Your name, email address, and account credentials</li>
+        <li>Behavioral screening responses about your child</li>
+        <li>ASD screening results and probability scores</li>
+        <li>Appointment booking details with healthcare providers</li>
+        <li>Device information and usage logs for security purposes</li>
+      </ul>
+
+      <h3 style="color:#4A90D9;margin:20px 0 8px">2. How We Use Your Information</h3>
+      <ul style="margin:0 0 16px;padding-left:20px">
+        <li>To provide ASD early screening services and generate reports</li>
+        <li>To facilitate appointment booking with recommended specialists</li>
+        <li>To improve the accuracy of our AI screening model</li>
+        <li>To send appointment confirmation and reminder emails</li>
+        <li>We <strong>never sell</strong> your personal or health information to third parties</li>
+      </ul>
+
+      <h3 style="color:#4A90D9;margin:20px 0 8px">3. Data Security &amp; Encryption</h3>
+      <ul style="margin:0 0 16px;padding-left:20px">
+        <li>All data is transmitted over <strong>SSL/TLS encrypted connections</strong></li>
+        <li>Passwords are stored as cryptographic hashes (never plain text)</li>
+        <li>Database access is restricted and access-logged</li>
+        <li>Session tokens are signed and expire automatically</li>
+      </ul>
+
+      <h3 style="color:#4A90D9;margin:20px 0 8px">4. Your Rights Under HIPAA</h3>
+      <ul style="margin:0 0 16px;padding-left:20px">
+        <li><strong>Right to Access:</strong> You may request a copy of your health information at any time</li>
+        <li><strong>Right to Correct:</strong> You may request correction of inaccurate information</li>
+        <li><strong>Right to Delete:</strong> You may request deletion of your account and all associated data</li>
+        <li><strong>Right to Restrict:</strong> You may limit how your information is used</li>
+        <li><strong>Right to Complain:</strong> You may file a complaint without retaliation</li>
+      </ul>
+
+      <h3 style="color:#4A90D9;margin:20px 0 8px">5. Disclosure to Third Parties</h3>
+      <p style="margin:0 0 16px">We may share information <strong>only</strong> in these situations:</p>
+      <ul style="margin:0 0 16px;padding-left:20px">
+        <li>With healthcare providers you explicitly choose to consult</li>
+        <li>When required by law or court order</li>
+        <li>In anonymized, aggregated form for research (no personal identifiers)</li>
+      </ul>
+
+      <h3 style="color:#4A90D9;margin:20px 0 8px">6. Data Retention</h3>
+      <ul style="margin:0 0 16px;padding-left:20px">
+        <li>Account data is retained while your account is active</li>
+        <li>Screening reports are stored for 12 months by default</li>
+        <li>You may request immediate deletion at any time</li>
+      </ul>
+
+      <h3 style="color:#4A90D9;margin:20px 0 8px">7. Screening Disclaimer</h3>
+      <div style="background:#fff3cd;border-left:4px solid #f0a500;padding:14px 18px;border-radius:0 8px 8px 0;margin-bottom:16px">
+        <strong>⚠️ Important:</strong> AutexAI Care is a <strong>screening tool only</strong> and does NOT provide medical diagnosis. Results should always be reviewed by a qualified healthcare professional. This platform is not a substitute for professional medical advice.
+      </div>
+
+      <h3 style="color:#4A90D9;margin:20px 0 8px">8. Contact Us</h3>
+      <p style="margin:0 0 8px">For privacy questions, data requests, or complaints:</p>
+      <p style="margin:0;background:#f5f5f5;padding:12px 16px;border-radius:8px">
+        📧 privacy@autexai.care<br>
+        📍 AutexAI Care, Pune, Maharashtra, India
+      </p>
+
+      <div style="margin-top:20px;padding:14px 18px;background:#e8f9ee;border-left:4px solid #28a745;border-radius:0 8px 8px 0;font-size:.85rem;color:#155724">
+        By checking the consent box and creating your account, you acknowledge that you have read this notice and agree to the collection and use of your information as described above.
+      </div>
+    </div>
+
+    <!-- Footer -->
+    <div style="padding:16px 28px;background:#f8f9fa;display:flex;gap:12px;justify-content:flex-end;border-top:1px solid #eee">
+      <button onclick="closeHipaaModal()" style="padding:10px 20px;background:#e0e0e0;border:none;border-radius:8px;cursor:pointer;font-size:.9rem">
+        Close
+      </button>
+      <button onclick="acceptHipaa()" style="padding:10px 24px;background:#4A90D9;color:white;border:none;border-radius:8px;cursor:pointer;font-size:.9rem;font-weight:600">
+        ✓ I Agree &amp; Accept
+      </button>
+    </div>
+  </div>
+</div>
+
+<style>
+.hipaa-view-btn{
+  margin-top:8px;padding:6px 14px;background:#e8f4fd;color:#4A90D9;
+  border:1px solid #4A90D9;border-radius:6px;cursor:pointer;font-size:.82rem;
+  font-weight:600;display:inline-flex;align-items:center;gap:6px
+}
+.hipaa-view-btn:hover{background:#4A90D9;color:white}
+.hipaa-link-btn{
+  background:none;border:none;color:#4A90D9;cursor:pointer;
+  padding:0;font-size:inherit;text-decoration:underline
+}
+</style>
+
+<script>
+function openHipaaModal() {
+  document.getElementById('hipaaModal').style.display = 'block';
+  document.body.style.overflow = 'hidden';
+}
+function closeHipaaModal() {
+  document.getElementById('hipaaModal').style.display = 'none';
+  document.body.style.overflow = '';
+}
+function acceptHipaa() {
+  // Tick the checkbox automatically when user clicks "I Agree & Accept"
+  document.getElementById('hipaaCheck').checked = true;
+  closeHipaaModal();
+}
+// Close modal if user clicks outside the white box
+document.getElementById('hipaaModal').addEventListener('click', function(e) {
+  if (e.target === this) closeHipaaModal();
+});
+</script>
+{% endblock %}

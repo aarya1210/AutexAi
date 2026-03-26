@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1.0">
+  <title>{% block title %}AutexAI Care{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+<nav class="navbar">
+  <div class="container nav-inner">
+    <a href="{{ url_for('index') }}" class="brand">
+      <svg width="28" height="28" viewBox="0 0 40 40" fill="none">
+        <circle cx="20" cy="20" r="20" fill="#4A90D9" opacity="0.15"/>
+        <circle cx="20" cy="20" r="8" fill="#4A90D9"/>
+      </svg>
+      <span>AutexAI</span>
+    </a>
+    <div class="nav-links">
+      <div class="lang-selector">
+        <a href="{{ url_for('set_lang', lang='en') }}" class="{% if session.get('lang','en')=='en' %}active{% endif %}">EN</a>
+        <a href="{{ url_for('set_lang', lang='hi') }}" class="{% if session.get('lang')=='hi' %}active{% endif %}">हि</a>
+        <a href="{{ url_for('set_lang', lang='mr') }}" class="{% if session.get('lang')=='mr' %}active{% endif %}">मर</a>
+      </div>
+      {% if session.get('user_id') %}
+        <a href="{{ url_for('dashboard') }}" class="nav-link">{{ t('dashboard') }}</a>
+        {% if session.get('role') == 'patient' %}
+          <a href="{{ url_for('questionnaire') }}" class="btn-nav-primary">{{ t('take_test') }}</a>
+        {% endif %}
+        <a href="{{ url_for('logout') }}" class="nav-link nav-link-muted">{{ t('logout') }}</a>
+      {% else %}
+        <a href="{{ url_for('login') }}" class="nav-link">{{ t('login') }}</a>
+        <a href="{{ url_for('register') }}" class="btn-nav-outline">{{ t('register') }}</a>
+      {% endif %}
+    </div>
+  </div>
+</nav>
+
+<div class="container main-wrap">
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% if messages %}
+      {% for cat, msg in messages %}
+        <div class="alert alert-{{ cat }}">{{ msg }}<button onclick="this.parentElement.remove()">×</button></div>
+      {% endfor %}
+    {% endif %}
+  {% endwith %}
+  {% block content %}{% endblock %}
+</div>
+
+<footer>
+  <div class="container">
+    <p>AutexAI Care — {{ t('tagline') }}</p>
+    <p class="footer-note">Screening tool only · Not a medical diagnosis · HIPAA Compliant</p>
+  </div>
+</footer>
+
+{% if session.get('user_id') %}
+<!-- ── Chatbot FAB ── -->
+<button class="chat-fab" onclick="toggleChat()" id="chatFab" title="Ask AutexAI Assistant">
+  <svg id="chatFabIcon" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+  </svg>
+  <span class="chat-badge" id="chatBadge">1</span>
+</button>
+
+<!-- ── Chat Window ── -->
+<div class="chat-window" id="chatWindow">
+  <div class="chat-win-header">
+    <div class="chat-win-avatar">🤖</div>
+    <div>
+      <div class="chat-win-title">AutexAI Assistant</div>
+      <div class="chat-win-sub">Ask about autism, assessments & appointments</div>
+    </div>
+    <button class="chat-win-close" onclick="toggleChat()">×</button>
+  </div>
+  <div class="chat-messages" id="chatMessages">
+    <div class="chat-msg bot">
+      <div class="chat-dot chat-dot-bot">🤖</div>
+      <div class="chat-bubble">Hello! I'm your AutexAI Care assistant. I can help with autism information, assessments, and booking appointments. What would you like to know?</div>
+    </div>
+  </div>
+  <div class="chat-quick-btns">
+    <button class="chat-qbtn" onclick="sendQuick('What is autism?')">What is autism?</button>
+    <button class="chat-qbtn" onclick="sendQuick('How to book appointment?')">Book appointment</button>
+    <button class="chat-qbtn" onclick="sendQuick('ASD symptoms')">ASD symptoms</button>
+    <button class="chat-qbtn" onclick="sendQuick('How accurate is the test?')">Accuracy</button>
+  </div>
+  <div class="chat-input-row">
+    <input type="text" class="chat-input" id="chatInput" placeholder="Type your question…" onkeypress="handleKey(event)">
+    <button class="chat-send" onclick="sendMessage()">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+    </button>
+  </div>
+</div>
+
+<script>
+let chatOpen = false;
+
+function toggleChat() {
+  chatOpen = !chatOpen;
+  const win = document.getElementById('chatWindow');
+  const badge = document.getElementById('chatBadge');
+  win.classList.toggle('open', chatOpen);
+  if (chatOpen) { badge.style.display = 'none'; document.getElementById('chatInput').focus(); }
+}
+
+function handleKey(e) { if (e.key === 'Enter') sendMessage(); }
+
+function sendQuick(text) {
+  document.getElementById('chatInput').value = text;
+  sendMessage();
+}
+
+async function sendMessage() {
+  const input = document.getElementById('chatInput');
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = '';
+  appendMsg('user', text);
+  showTyping();
+  try {
+    const res = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: text })
+    });
+    const data = await res.json();
+    removeTyping();
+    appendMsg('bot', data.reply);
+  } catch {
+    removeTyping();
+    appendMsg('bot', 'Sorry, I encountered an error. Please try again.');
+  }
+}
+
+function appendMsg(role, text) {
+  const msgs = document.getElementById('chatMessages');
+  const div = document.createElement('div');
+  div.className = `chat-msg ${role}`;
+  const dot = document.createElement('div');
+  dot.className = `chat-dot chat-dot-${role}`;
+  dot.textContent = role === 'bot' ? '🤖' : '👤';
+  const bubble = document.createElement('div');
+  bubble.className = 'chat-bubble';
+  bubble.textContent = text;
+  div.appendChild(dot);
+  div.appendChild(bubble);
+  msgs.appendChild(div);
+  msgs.scrollTop = msgs.scrollHeight;
+}
+
+function showTyping() {
+  const msgs = document.getElementById('chatMessages');
+  const div = document.createElement('div');
+  div.className = 'chat-msg bot';
+  div.id = 'typingIndicator';
+  div.innerHTML = `<div class="chat-dot chat-dot-bot">🤖</div><div class="chat-bubble chat-typing"><div class="typing-dot"></div><div class="typing-dot"></div><div class="typing-dot"></div></div>`;
+  msgs.appendChild(div);
+  msgs.scrollTop = msgs.scrollHeight;
+}
+
+function removeTyping() {
+  const el = document.getElementById('typingIndicator');
+  if (el) el.remove();
+}
+</script>
+{% endif %}
+
+<script src="{{ url_for('static', filename='js/main.js') }}"></script>
+</body>
+</html>

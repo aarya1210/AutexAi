@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+{% block title %}Doctor Dashboard — AutexAI{% endblock %}
+{% block content %}
+<div class="dash-wrap">
+  <div class="dash-header">
+    <div>
+      <h2>{% if session.get('lang')=='hi' %}डॉक्टर डैशबोर्ड{% elif session.get('lang')=='mr' %}डॉक्टर डॅशबोर्ड{% else %}Doctor Dashboard{% endif %}</h2>
+      <p>{{ session.username }} · {% if session.get('lang')=='hi' %}सभी मरीज़ों का डेटा{% elif session.get('lang')=='mr' %}सर्व रुग्णांचा डेटा{% else %}All patient assessments{% endif %}</p>
+    </div>
+  </div>
+
+  <div class="doctor-stats-row">
+    <div class="stat-card">
+      <div class="stat-icon">📋</div>
+      <div class="stat-num">{{ preds|length }}</div>
+      <div class="stat-lbl">{% if session.get('lang')=='hi' %}कुल मूल्यांकन{% elif session.get('lang')=='mr' %}एकूण मूल्यमापन{% else %}Total Assessments{% endif %}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-icon">⚠️</div>
+      <div class="stat-num" style="color:var(--red)">{{ total_asd }}</div>
+      <div class="stat-lbl">{% if session.get('lang')=='hi' %}ASD पहचाना{% elif session.get('lang')=='mr' %}ASD आढळले{% else %}ASD Detected{% endif %}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-icon">👥</div>
+      <div class="stat-num">{{ patients|length }}</div>
+      <div class="stat-lbl">{% if session.get('lang')=='hi' %}कुल मरीज़{% elif session.get('lang')=='mr' %}एकूण रुग्ण{% else %}Total Patients{% endif %}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-icon">🤖</div>
+      <div class="stat-num">{{ model_metrics.get('accuracy','—') }}%</div>
+      <div class="stat-lbl">{% if session.get('lang')=='hi' %}मॉडल सटीकता{% elif session.get('lang')=='mr' %}मॉडेल अचूकता{% else %}Model Accuracy{% endif %}</div>
+    </div>
+  </div>
+
+  {% if preds %}
+  <div class="table-card" style="margin-bottom:16px">
+    <h3>{% if session.get('lang')=='hi' %}सभी मूल्यांकन{% elif session.get('lang')=='mr' %}सर्व मूल्यमापन{% else %}All Assessments{% endif %}</h3>
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>{% if session.get('lang')=='hi' %}मरीज़{% elif session.get('lang')=='mr' %}रुग्ण{% else %}Patient{% endif %}</th>
+          <th>{% if session.get('lang')=='hi' %}तारीख{% elif session.get('lang')=='mr' %}तारीख{% else %}Date{% endif %}</th>
+          <th>{% if session.get('lang')=='hi' %}संभावना{% elif session.get('lang')=='mr' %}संभाव्यता{% else %}Probability{% endif %}</th>
+          <th>{% if session.get('lang')=='hi' %}परिणाम{% elif session.get('lang')=='mr' %}परिणाम{% else %}Result{% endif %}</th>
+          <th>{% if session.get('lang')=='hi' %}क्रियाएं{% elif session.get('lang')=='mr' %}क्रिया{% else %}Actions{% endif %}</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for p in preds %}
+        <tr>
+          <td>{{ loop.index }}</td>
+          <td style="font-weight:600">{{ p.uname }}</td>
+          <td>{{ p.created_at[:16].replace('T',' ') }}</td>
+          <td class="prob-cell {% if p.asd_probability >= p.asd_threshold %}prob-high{% else %}prob-low{% endif %}">{{ "%.1f"|format(p.asd_probability) }}%</td>
+          <td><span class="badge {% if p.prediction_label=='ASD Detected' %}badge-danger{% else %}badge-success{% endif %}">{{ p.prediction_label }}</span></td>
+          <td style="display:flex;gap:8px;">
+            <a href="{{ url_for('results', pred_id=p.id) }}" class="btn btn-sm btn-secondary">View</a>
+            <a href="{{ url_for('download_report', pred_id=p.id) }}" class="btn btn-sm btn-outline">PDF</a>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+
+  {% if patients %}
+  <div class="table-card">
+    <h3>{% if session.get('lang')=='hi' %}पंजीकृत मरीज़{% elif session.get('lang')=='mr' %}नोंदणीकृत रुग्ण{% else %}Registered Patients{% endif %}</h3>
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>{% if session.get('lang')=='hi' %}उपयोगकर्ता नाम{% elif session.get('lang')=='mr' %}वापरकर्ता नाव{% else %}Username{% endif %}</th>
+          <th>Email</th>
+          <th>{% if session.get('lang')=='hi' %}पंजीकृत{% elif session.get('lang')=='mr' %}नोंदणी{% else %}Registered{% endif %}</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for pt in patients %}
+        <tr>
+          <td>{{ loop.index }}</td>
+          <td style="font-weight:600">{{ pt.username }}</td>
+          <td>{{ pt.email }}</td>
+          <td>{{ pt.created_at[:10] if pt.created_at else '—' }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

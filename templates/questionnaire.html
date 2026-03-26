@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% block title %}Assessment — AutexAI{% endblock %}
+{% block content %}
+<div class="q-wrap">
+  <div class="q-header">
+    <h2>{% if lang=='hi' %}अपने बच्चे को जानें{% elif lang=='mr' %}तुमच्या मुलाला जाणून घ्या{% else %}Understanding Your Child{% endif %}</h2>
+    <p>{% if lang=='hi' %}15 सवाल • बस हाँ या ना चुनें{% elif lang=='mr' %}15 प्रश्न • फक्त होय किंवा नाही निवडा{% else %}15 Questions &nbsp;·&nbsp; Yes or No answers{% endif %}</p>
+    <div class="comfort-msg">
+      <span class="comfort-icon">🌿</span>
+      <span>{% if lang=='hi' %}आप अकेले नहीं हैं — हम यहाँ मदद के लिए हैं{% elif lang=='mr' %}तुम्ही एकटे नाही — आम्ही मदतीसाठी येथे आहोत{% else %}You're not alone — we're here to help{% endif %}</span>
+    </div>
+    <div class="progress-wrap">
+      <div class="progress-bar-outer"><div class="progress-bar-fill" id="progressFill" style="width:0%"></div></div>
+      <span id="progressText">0 / {{ questions|length }}</span>
+    </div>
+  </div>
+
+  <form method="POST" action="{{ url_for('questionnaire') }}" id="qForm">
+    {% for q in questions %}
+    <div class="q-card-img-wrap" id="card-{{ loop.index }}">
+      <!-- Full background image with gradient overlay -->
+      <div class="q-img-bg" style="background-image: url('{{ url_for('static', filename='images/' + q.image) }}')">
+        <div class="q-img-gradient"></div>
+        <div class="q-img-badge">{% if lang=='hi' %}प्रश्न{% elif lang=='mr' %}प्रश्न{% else %}Q{% endif %}{{ loop.index }}/{{ questions|length }}</div>
+      </div>
+      <!-- Content -->
+      <div class="q-card-body">
+        <div class="q-text-main">{{ q.text }}</div>
+        <div class="q-quote-row">
+          <span class="quote-dot"></span>
+          <span class="q-quote-txt">{{ q.quote }}</span>
+        </div>
+        <div class="yn-wrap">
+          <label class="yn-label">
+            <input type="radio" name="{{ q.key }}" value="1" required>
+            <span class="yn-btn yes-btn">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>
+              {% if lang=='hi' %}हाँ{% elif lang=='mr' %}होय{% else %}Yes{% endif %}
+            </span>
+          </label>
+          <label class="yn-label">
+            <input type="radio" name="{{ q.key }}" value="0">
+            <span class="yn-btn no-btn">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+              {% if lang=='hi' %}नहीं{% elif lang=='mr' %}नाही{% else %}No{% endif %}
+            </span>
+          </label>
+        </div>
+      </div>
+    </div>
+    {% endfor %}
+
+    <div class="q-footer">
+      <button type="submit" class="btn btn-primary btn-large" id="submitBtn">
+        Analyze Results
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+      </button>
+      <a href="{{ url_for('dashboard') }}" class="btn btn-outline">Cancel</a>
+      <p class="footer-comfort">Your care and awareness make a real difference</p>
+    </div>
+  </form>
+</div>
+{% endblock %}

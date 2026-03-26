@@ -1,0 +1,245 @@
+{% extends "base.html" %}
+{% block title %}{{ doc.name }} — AutexAI{% endblock %}
+{% block content %}
+<div class="profile-wrap">
+
+  <!-- Header Card -->
+  <div class="profile-header-card">
+    <div class="profile-avatar">
+      <svg width="64" height="64" viewBox="0 0 64 64" fill="none">
+        <circle cx="32" cy="32" r="32" fill="#E8F0FE"/>
+        <circle cx="32" cy="26" r="12" fill="#9BAEC8"/>
+        <ellipse cx="32" cy="52" rx="18" ry="12" fill="#9BAEC8"/>
+      </svg>
+    </div>
+    <div class="profile-info">
+      <h2>{{ doc.name }}</h2>
+      <p class="profile-spec">{{ doc.specialty }}</p>
+      <p class="profile-hospital">{{ doc.hospital }}</p>
+      <span class="profile-badge">Verified Specialist</span>
+    </div>
+  </div>
+
+  <!-- Action Buttons -->
+  <div class="profile-actions">
+    <button class="action-btn action-video" onclick="openBookModal('video')">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
+      Video Consult
+    </button>
+    <button class="action-btn action-clinic" onclick="openBookModal('in_clinic')">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+      In-Clinic Consult
+    </button>
+  </div>
+
+  <!-- Clinic & Timings -->
+  <div class="profile-section">
+    <h3 class="section-label">CLINIC &amp; TIMINGS</h3>
+    <div class="clinic-block">
+      <p class="clinic-name">{{ doc.hospital }}</p>
+      <p class="clinic-addr">{{ doc.address }}</p>
+      <p class="clinic-timing"><strong>09:00 AM – 01:00 PM</strong> (Mon–Sat)</p>
+      <p class="clinic-timing"><strong>05:00 PM – 08:00 PM</strong> (Weekdays)</p>
+      <div class="clinic-btns">
+        <a href="tel:{{ doc.phone }}" class="clinic-btn">📞 Call Clinic</a>
+        <a href="mailto:{{ doc.email }}" class="clinic-btn">✉️ Email</a>
+        <a href="https://maps.google.com/?q={{ doc.address | urlencode }}" target="_blank" class="clinic-btn clinic-btn-outline">📍 Get Direction</a>
+      </div>
+    </div>
+  </div>
+
+  <!-- Upcoming Appointments (only show non-cancelled for this doctor) -->
+  {% set visible = appointments | selectattr('status', 'ne', 'cancelled') | list %}
+  {% if visible %}
+  <div class="profile-section">
+    <h3 class="section-label">UPCOMING APPOINTMENTS</h3>
+    {% for a in visible %}
+    <div class="appt-row {% if a.status=='confirmed' %}appt-confirmed{% elif a.status=='cancelled' %}appt-cancelled{% else %}appt-pending{% endif %}">
+      <div class="appt-row-left">
+        <p class="appt-patient"><strong>{{ a.patient_name }}</strong></p>
+        <p class="appt-datetime">{{ a.appt_date }} at {{ a.appt_time }}</p>
+        <span class="appt-type-chip {% if a.appt_type=='video' %}chip-video{% else %}chip-clinic{% endif %}">
+          {{ '📹 Video' if a.appt_type=='video' else '🏥 In-Clinic' }}
+        </span>
+      </div>
+      <div>
+        <span class="status-badge status-{{ a.status }}">{{ a.status | capitalize }}</span>
+        {% if a.status == 'pending' and session.get('role') == 'doctor' %}
+        <form method="POST" action="{{ url_for('confirm_appointment', appt_id=a.id) }}" style="display:inline">
+          <button class="btn btn-sm btn-primary" style="margin-left:8px">✓ Confirm</button>
+        </form>
+        {% endif %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  <a href="{{ url_for('dashboard') }}" class="btn btn-outline" style="margin-top:8px">← Back to Dashboard</a>
+</div>
+
+<!-- Booking Modal -->
+<div class="modal-overlay" id="bookModal">
+  <div class="modal-box">
+    <div class="modal-header">
+      <h3 id="modalTitle">Book Appointment</h3>
+      <button class="modal-close" onclick="closeBookModal()">×</button>
+    </div>
+    <form method="POST" action="{{ url_for('book_appointment') }}" class="modal-form">
+      <input type="hidden" name="doctor_name"  value="{{ doc.name }}">
+      <input type="hidden" name="doctor_email" value="{{ doc.email }}">
+      <input type="hidden" name="appt_type"    id="apptTypeInput" value="in_clinic">
+
+      <div class="modal-appt-type" id="modalApptTypeBadge">
+        <span id="apptTypeLabel">In-Clinic Consult</span>
+      </div>
+
+      <div class="form-field">
+        <label class="field-label">Select Date</label>
+        <input type="date" name="appt_date" class="field-input-plain" required id="apptDate">
+      </div>
+
+      <div class="form-field">
+        <label class="field-label">Select Time Slot</label>
+        <!--
+          SLOT AVAILABILITY SYSTEM:
+          When the user picks a date, fetchSlots() calls /api/available_slots?doctor_name=...&date=...
+          The server returns only the slots NOT already booked.
+          We then render ONLY those slots here — booked slots never appear.
+          This means Patient B can never see or click a slot Patient A already booked.
+        -->
+        <div id="slotLoader" style="display:none;color:#888;font-size:13px;padding:8px 0">
+          ⏳ Loading available slots...
+        </div>
+        <div id="noSlotsMsg" style="display:none;color:#e53e3e;font-size:13px;padding:8px 0">
+          ❌ No slots available on this date. Please choose another day.
+        </div>
+        <div class="time-slots" id="timeSlots"></div>
+      </div>
+
+      <div class="form-field">
+        <label class="field-label">Notes (optional)</label>
+        <textarea name="notes" class="field-input-plain" rows="2"
+                  placeholder="Any specific concerns for the doctor..."></textarea>
+      </div>
+
+      <div class="modal-footer">
+        <button type="submit" id="confirmBtn" class="btn btn-primary btn-block" disabled>
+          Confirm Booking
+        </button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<script>
+// ── DOCTOR NAME (used in API call) ────────────────────────────────────────────
+const DOCTOR_NAME = {{ doc.name | tojson }};
+
+// ── OPEN MODAL ────────────────────────────────────────────────────────────────
+// Sets the appointment type (video / in_clinic), updates UI labels,
+// sets min date to today, resets slot area, opens the modal overlay.
+function openBookModal(type) {
+  document.getElementById('apptTypeInput').value = type;
+  document.getElementById('apptTypeLabel').textContent =
+    type === 'video' ? '📹 Video Consult' : '🏥 In-Clinic Visit';
+  document.getElementById('modalTitle').textContent =
+    type === 'video' ? 'Book Video Consult' : 'Book In-Clinic Visit';
+
+  // Prevent booking in the past
+  const today = new Date().toISOString().split('T')[0];
+  const dateInput = document.getElementById('apptDate');
+  dateInput.min   = today;
+  dateInput.value = '';
+
+  // Reset slots area
+  document.getElementById('timeSlots').innerHTML  = '';
+  document.getElementById('slotLoader').style.display  = 'none';
+  document.getElementById('noSlotsMsg').style.display  = 'none';
+  document.getElementById('confirmBtn').disabled = true;
+
+  document.getElementById('bookModal').classList.add('active');
+}
+
+// ── CLOSE MODAL ───────────────────────────────────────────────────────────────
+function closeBookModal() {
+  document.getElementById('bookModal').classList.remove('active');
+}
+
+// ── FETCH AVAILABLE SLOTS (★ NEW) ────────────────────────────────────────────
+// Called every time the user changes the date picker.
+// Makes a GET request to /api/available_slots?doctor_name=...&date=...
+// The server returns only non-booked slots in JSON.
+// We then dynamically build radio buttons for each available slot.
+function fetchSlots(date) {
+  const container = document.getElementById('timeSlots');
+  const loader    = document.getElementById('slotLoader');
+  const noMsg     = document.getElementById('noSlotsMsg');
+  const confirmBtn = document.getElementById('confirmBtn');
+
+  // Reset UI
+  container.innerHTML = '';
+  noMsg.style.display = 'none';
+  confirmBtn.disabled = true;
+
+  if (!date) return;
+
+  // Show loading spinner
+  loader.style.display = 'block';
+
+  // Build URL with query params
+  const url = `/api/available_slots?doctor_name=${encodeURIComponent(DOCTOR_NAME)}&date=${date}`;
+
+  // fetch() sends a GET request — async, non-blocking
+  fetch(url)
+    .then(res => res.json())       // parse JSON response body
+    .then(data => {
+      loader.style.display = 'none';
+      const slots = data.available; // array of time strings e.g. ["09:00","09:30",...]
+
+      if (!slots || slots.length === 0) {
+        // No slots — show message, hide slot chips
+        noMsg.style.display = 'block';
+        return;
+      }
+
+      // Build a radio button chip for each available slot
+      slots.forEach(slot => {
+        const label = document.createElement('label');
+        label.className = 'slot-label';
+
+        const radio = document.createElement('input');
+        radio.type  = 'radio';
+        radio.name  = 'appt_time';    // matches form field name in book_appointment()
+        radio.value = slot;
+        radio.className = 'slot-radio';
+        radio.addEventListener('change', function() {
+          // Highlight selected chip + enable submit button
+          document.querySelectorAll('.slot-chip').forEach(c => c.classList.remove('slot-selected'));
+          this.nextElementSibling.classList.add('slot-selected');
+          confirmBtn.disabled = false;    // enable only after a slot is picked
+        });
+
+        const chip = document.createElement('span');
+        chip.className   = 'slot-chip';
+        chip.textContent = slot;
+
+        label.appendChild(radio);
+        label.appendChild(chip);
+        container.appendChild(label);
+      });
+    })
+    .catch(err => {
+      loader.style.display = 'none';
+      container.innerHTML = '<p style="color:#e53e3e">Error loading slots. Try again.</p>';
+      console.error('Slot fetch error:', err);
+    });
+}
+
+// ── DATE CHANGE LISTENER ─────────────────────────────────────────────────────
+// Every time user picks a new date, call fetchSlots() to refresh the slot grid.
+document.getElementById('apptDate').addEventListener('change', function() {
+  fetchSlots(this.value);
+});
+</script>
+{% endblock %}

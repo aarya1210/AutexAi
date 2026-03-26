@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+{% block title %}Results — AutexAI{% endblock %}
+{% block content %}
+<div class="results-wrap">
+  <div class="results-header">
+    <h2>{% if session.get('lang')=='hi' %}मूल्यांकन परिणाम{% elif session.get('lang')=='mr' %}मूल्यमापन परिणाम{% else %}Assessment Results{% endif %}</h2>
+    <p style="color:var(--text-2);font-size:.875rem;margin-top:4px;">{{ pred.username }} · {{ pred.created_at[:16].replace('T',' ') if pred.created_at else '' }}</p>
+  </div>
+
+  <div class="score-grid">
+    <div class="score-box">
+      <h4>{% if session.get('lang')=='hi' %}ASD संभावना{% elif session.get('lang')=='mr' %}ASD संभाव्यता{% else %}ASD Probability{% endif %}</h4>
+      <div class="big-donut {% if pred.asd_probability >= pred.asd_threshold %}donut-high{% else %}donut-low{% endif %}">
+        {{ "%.1f"|format(pred.asd_probability) }}%
+      </div>
+      <div class="verdict {% if pred.asd_probability >= pred.asd_threshold %}verdict-high{% else %}verdict-low{% endif %}">
+        {% if session.get('lang')=='hi' %}{% if pred.prediction_label=='ASD Detected' %}ASD संकेत मिले{% else %}ASD संकेत नहीं{% endif %}
+        {% elif session.get('lang')=='mr' %}{% if pred.prediction_label=='ASD Detected' %}ASD संकेत मिळाले{% else %}ASD संकेत नाही{% endif %}
+        {% else %}{{ pred.prediction_label }}{% endif %}
+      </div>
+    </div>
+    <div class="score-box">
+      <h4>{% if session.get('lang')=='hi' %}सीमा{% elif session.get('lang')=='mr' %}उंबरठा{% else %}Threshold{% endif %}</h4>
+      <div class="big-donut donut-neutral">{{ "%.1f"|format(pred.asd_threshold) }}%</div>
+      <p style="font-size:.8rem;color:var(--text-2);margin-top:8px;">
+        {% if session.get('lang')=='hi' %}स्क्रीनिंग सीमा{% elif session.get('lang')=='mr' %}स्क्रीनिंग उंबरठा{% else %}Screening threshold{% endif %}
+      </p>
+    </div>
+    <div class="score-box">
+      <h4>{% if session.get('lang')=='hi' %}विश्वास{% elif session.get('lang')=='mr' %}आत्मविश्वास{% else %}Confidence{% endif %}</h4>
+      <div class="big-donut donut-neutral" style="font-size:1rem;">{{ pred.confidence }}</div>
+      <span class="confidence-badge {% if pred.confidence=='High' %}conf-high{% else %}conf-moderate{% endif %}">
+        {% if pred.confidence == 'High' %}
+          {% if session.get('lang')=='hi' %}उच्च विश्वास{% elif session.get('lang')=='mr' %}उच्च आत्मविश्वास{% else %}High Confidence{% endif %}
+        {% else %}
+          {% if session.get('lang')=='hi' %}मध्यम विश्वास{% elif session.get('lang')=='mr' %}मध्यम आत्मविश्वास{% else %}Moderate Confidence{% endif %}
+        {% endif %}
+      </span>
+    </div>
+  </div>
+
+  {% if top_features %}
+  <div class="result-section">
+    <h3>{% if session.get('lang')=='hi' %}प्रमुख व्यवहार संकेतक{% elif session.get('lang')=='mr' %}प्रमुख वर्तन संकेतक{% else %}Key Behavioral Indicators{% endif %}</h3>
+    <div class="feature-list">
+      {% for name, val in top_features[:6] %}
+      <div class="feature-item">
+        <span class="feature-name">{{ name }}</span>
+        <span class="feature-val {% if val >= 0 %}feature-pos{% else %}feature-neg{% endif %}">
+          {% if val >= 0 %}↑ Increases risk{% else %}↓ Decreases risk{% endif %}
+        </span>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
+  {% if shap_img %}
+  <div class="result-section">
+    <h3>{% if session.get('lang')=='hi' %}विश्लेषण चार्ट{% elif session.get('lang')=='mr' %}विश्लेषण चार्ट{% else %}Analysis Chart{% endif %}</h3>
+    <img src="{{ url_for('static', filename='reports/' + shap_img) }}" alt="SHAP Analysis" class="shap-img">
+  </div>
+  {% endif %}
+
+  {% if show_doctors %}
+  <div class="result-section">
+    <h3>{% if session.get('lang')=='hi' %}अनुशंसित विशेषज्ञ{% elif session.get('lang')=='mr' %}शिफारस केलेले तज्ञ{% else %}Recommended Specialists{% endif %}</h3>
+    <div class="doctors-grid">
+      {% for doc in doctors %}
+      <div class="doctor-card">
+        <h4>{{ doc.name }}</h4>
+        <p class="specialty">{{ doc.specialty }}</p>
+        <div class="doctor-detail">🏥 {{ doc.hospital }}</div>
+        <div class="doctor-detail">📍 {{ doc.address }}</div>
+        <div class="doctor-detail">📞 {{ doc.phone }}</div>
+        <div class="doctor-detail">✉️ {{ doc.email }}</div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
+  <div style="display:flex;gap:12px;margin-top:8px;">
+    <a href="{{ url_for('download_report', pred_id=pred.id) }}" class="btn btn-primary">Download PDF Report</a>
+    <a href="{{ url_for('dashboard') }}" class="btn btn-outline">Back to Dashboard</a>
+  </div>
+
+  <p style="margin-top:20px;font-size:.78rem;color:var(--text-3);line-height:1.6;">
+    <strong>Important:</strong> This is a screening tool, not a medical diagnosis. Only a licensed specialist can diagnose ASD. All data handled under HIPAA privacy regulations.
+  </p>
+</div>
+{% endblock %}
