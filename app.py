@@ -57,8 +57,43 @@ if os.path.exists(config.MODEL_PATH):
     asd_model.load(config.MODEL_PATH)
     MODEL_OK = True
 
-with app.app_context():
-    init_db()
+# ============================================================
+# HOW TO APPLY THIS PATCH TO app.py
+# ============================================================
+# In your app.py, find this OLD block (around line 60):
+#
+#     with app.app_context():
+#         init_db()
+#
+# DELETE those two lines and REPLACE them with the block below.
+# Everything else in app.py stays the same.
+# ============================================================
+
+
+# ── LAZY DATABASE INITIALISATION ─────────────────────────────────────────────
+# DO NOT call init_db() here at module level.
+# Calling it at import time causes gunicorn to crash with
+#   "psycopg2.OperationalError: Name or service not known"
+# because the Supabase DNS is not yet resolvable during the
+# cold-start window before gunicorn binds the port.
+#
+# This before_request hook runs init_db() exactly ONCE — on the
+# very first HTTP request, after gunicorn has fully started and
+# the network is available.  A threading.Lock stops multiple
+# workers from racing on the same first request.
+
+import threading
+_db_initialised = False
+_db_lock = threading.Lock()
+
+@app.before_request
+def ensure_db():
+    global _db_initialised
+    if not _db_initialised:
+        with _db_lock:
+            if not _db_initialised:   # double-checked locking
+                init_db()
+                _db_initialised = True
 
 # =============================================================================
 # EMAIL HELPER
