@@ -1,22 +1,30 @@
+# render.yaml — AutexAI
+# ─────────────────────────────────────────────────────────────────────────────
+# DATABASE NOTE:
+#   We use Supabase PostgreSQL (external DB), NOT a Render-managed database.
+#   Set DATABASE_URL manually in Render dashboard → Environment tab.
+#   Format: postgresql://postgres:[PASSWORD]@db.[PROJECT-REF].supabase.co:5432/postgres
+#
+#   DO NOT add a `databases:` section here — that would spin up a separate
+#   Render Postgres instance and conflict with your Supabase DATABASE_URL.
+# ─────────────────────────────────────────────────────────────────────────────
+
 services:
   - type: web
     name: autexai
     env: python
+    region: singapore          # closest free-tier region to India
+    plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app --workers 2 --bind 0.0.0.0:$PORT
+    startCommand: gunicorn app:app --workers 1 --timeout 120 --bind 0.0.0.0:$PORT
     envVars:
       - key: SECRET_KEY
         generateValue: true
       - key: DATABASE_URL
-        fromDatabase:
-          name: autexai-db
-          property: connectionString
-      - key: SUPABASE_URL
+        sync: false            # ← paste your Supabase URI here in the dashboard
+      - key: MAIL_USER
         sync: false
-      - key: SUPABASE_ANON_KEY
+      - key: MAIL_PASS
         sync: false
-
-databases:
-  - name: autexai-db
-    databaseName: autexai
-    user: autexai
+      - key: PYTHON_VERSION
+        value: 3.11.0          # pin to 3.11 — avoids Python 3.14 breakage
