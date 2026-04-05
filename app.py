@@ -1,46 +1,31 @@
 """
-AutexAI Care — app.py  (v4 — Slot Locking + Email Notifications)
-=================================================================
-LINE-BY-LINE EXPLANATION IS IN THE COMMENTS ABOVE EVERY SECTION.
-Model logic (ASDModel, predict, shap) is UNTOUCHED.
+AutexAI Care — app.py
+=====================
+FIXES IN THIS VERSION:
+  - All db.execute() calls replaced with a db_exec() helper that:
+      * Creates a cursor (psycopg2 needs this; sqlite3 connection has execute but cursor is cleaner)
+      * Converts ? → %s placeholders automatically for psycopg2
+      * Returns the cursor so .fetchone() / .fetchall() work the same way
+  - last_insert_rowid() replaced with RETURNING id (PostgreSQL) or lastrowid (SQLite)
+  - init_db() moved to @app.before_request (lazy) — no crash at cold-start
+  - Model load wrapped in try/except — port binds even if .pkl has issues
+  - Model logic (predict, shap, ensemble) is completely UNTOUCHED
 """
 
-# ── STANDARD LIBRARY IMPORTS ──────────────────────────────────────────────────
-# os, sys  : file paths, sys.path manipulation
-# json     : serialize/deserialize Python dicts to store in DB as TEXT
-# time     : timestamp for PDF filenames
-# random   : shuffle questions each load so order doesn't bias answers
-# smtplib  : Python's built-in SMTP client — used to send emails
-# email.*  : build multipart HTML+plain-text email messages
-import os, sys, json, time, random, smtplib
+import os, sys, json, time, random, smtplib, threading
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from datetime import datetime
-from functools import wraps          # preserves function name/docstring in decorators
+from functools import wraps
 
-# ── FLASK IMPORTS ─────────────────────────────────────────────────────────────
-# Flask        : the web application object
-# render_template : renders Jinja2 HTML templates from /templates folder
-# request      : incoming HTTP request data (form fields, JSON body, etc.)
-# redirect     : send the browser to a different URL
-# url_for      : generate a URL from a route function name (avoids hardcoding URLs)
-# flash        : one-time messages shown to the user (success/error banners)
-# session      : server-side per-user storage (stores user_id, username, role)
-# send_file    : stream a file download to the browser
-# jsonify      : converts a Python dict to a JSON HTTP response
 from flask import (Flask, render_template, request, redirect, url_for,
                    flash, session, send_file, jsonify)
-
-# ── WERKZEUG ──────────────────────────────────────────────────────────────────
-# generate_password_hash : bcrypt/pbkdf2 hash of a plain-text password
-# check_password_hash    : verifies plain-text against stored hash
 from werkzeug.security import generate_password_hash, check_password_hash
 
-# ── PROJECT MODULES ───────────────────────────────────────────────────────────
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import config
-from models.db import get_db, init_db
+from models.db import get_db, init_db, _is_pg
 from models.ml_model import ASDModel, QUESTIONS, FEATURE_LABELS, RECOMMENDED_DOCTORS
 
 # ── FLASK APP SETUP ───────────────────────────────────────────────────────────
@@ -51,32 +36,20 @@ os.makedirs(config.REPORTS_FOLDER, exist_ok=True)
 os.makedirs(os.path.dirname(config.DATABASE), exist_ok=True)
 
 # ── LOAD ML MODEL ─────────────────────────────────────────────────────────────
-# Wrapped in try/except: if the .pkl was built on a different numpy/Python
-# version (the numpy BitGenerator error) the app still starts and serves
-# traffic.  MODEL_OK stays False so the questionnaire shows a graceful error
-# instead of crashing gunicorn before it can bind the port.
+# Wrapped in try/except so a bad .pkl does not crash gunicorn before port bind
 asd_model = ASDModel()
 MODEL_OK = False
 if os.path.exists(config.MODEL_PATH):
     try:
         asd_model.load(config.MODEL_PATH)
         MODEL_OK = True
-    except Exception as _model_load_err:
+    except Exception as _e:
         import logging as _lg
-        _lg.getLogger(__name__).error(
-            "Could not load autism_model.pkl: %s — "
-            "app will start but predictions are disabled until retrained.",
-            _model_load_err,
-        )
+        _lg.getLogger(__name__).error("Could not load model: %s", _e)
 
-# ── LAZY DATABASE INITIALISATION ──────────────────────────────────────────────
-# DO NOT call init_db() at module level — it crashes gunicorn when the
-# Supabase DNS is not yet reachable during the cold-start window.
-# This before_request hook runs init_db() exactly once on the first HTTP
-# request, after gunicorn has fully bound the port and the network is up.
-import threading as _threading
+# ── LAZY DATABASE INIT ────────────────────────────────────────────────────────
 _db_ready = False
-_db_lock  = _threading.Lock()
+_db_lock  = threading.Lock()
 
 @app.before_request
 def _ensure_db():
@@ -88,38 +61,68 @@ def _ensure_db():
                 _db_ready = True
 
 # =============================================================================
+# DB HELPER  — works for both SQLite (?) and psycopg2 (%s)
+# =============================================================================
+def db_exec(conn, sql, params=()):
+    """
+    Execute a SQL statement on either a sqlite3 or psycopg2 connection.
+
+    sqlite3  uses ? placeholders and supports conn.execute() directly.
+    psycopg2 uses %s placeholders and requires a cursor.
+
+    This helper normalises both so every caller looks the same:
+        cur = db_exec(db, 'SELECT ...', (val,))
+        row = cur.fetchone()
+    """
+    if _is_pg(conn):
+        # Replace every ? with %s for psycopg2
+        sql = sql.replace('?', '%s')
+        cur = conn.cursor()
+        cur.execute(sql, params)
+        return cur
+    else:
+        # sqlite3 connection.execute() returns a cursor directly
+        return conn.execute(sql, params)
+
+
+def db_insert_returning_id(conn, sql, params=()):
+    """
+    INSERT and return the new row's id.
+    PostgreSQL: uses RETURNING id clause.
+    SQLite:     uses lastrowid on the cursor.
+    """
+    if _is_pg(conn):
+        # Strip any trailing semicolon, add RETURNING id
+        sql = sql.rstrip(';').rstrip() + ' RETURNING id'
+        sql = sql.replace('?', '%s')
+        cur = conn.cursor()
+        cur.execute(sql, params)
+        row = cur.fetchone()
+        return row['id'] if row else None
+    else:
+        cur = conn.execute(sql, params)
+        return cur.lastrowid
+
+# =============================================================================
 # EMAIL HELPER
 # =============================================================================
 def send_email(to_list, subject, html_body):
-    """
-    Send HTML email via Gmail SMTP SSL.
-    IMPORTANT: Set MAIL_USER and MAIL_PASS in Render environment variables.
-    MAIL_PASS must be a Gmail App Password (not your normal password).
-    Steps to get App Password:
-      Google Account -> Security -> 2-Step Verification -> App Passwords
-      -> Select app: Mail, device: Other -> Copy the 16-char password
-    """
     mail_user = config.MAIL_USER
     mail_pass = config.MAIL_PASS
-
     if not mail_user or not mail_pass:
-        print("[EMAIL] MAIL_USER/MAIL_PASS not configured — skipping email")
+        print("[EMAIL] Not configured — skipping")
         return False
-
     try:
         msg = MIMEMultipart('alternative')
         msg['Subject'] = subject
         msg['From']    = f"AutexAI Care <{mail_user}>"
         msg['To']      = ", ".join(to_list)
-
         plain = html_body.replace('<br>', '\n').replace('</p>', '\n')
         msg.attach(MIMEText(plain, 'plain'))
         msg.attach(MIMEText(html_body, 'html'))
-
         with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
             server.login(mail_user, mail_pass)
             server.sendmail(mail_user, to_list, msg.as_string())
-
         print(f"[EMAIL] Sent '{subject}' to {to_list}")
         return True
     except Exception as e:
@@ -129,7 +132,6 @@ def send_email(to_list, subject, html_body):
 
 def _booking_email_html(patient_name, doctor_name, appt_date, appt_time,
                          appt_type, notes, status):
-    """Builds the HTML email body for booking and confirmation emails."""
     type_label   = "Video Consult" if appt_type == "video" else "In-Clinic Visit"
     status_color = {"pending": "#f0a500", "confirmed": "#28a745",
                     "cancelled": "#dc3545"}.get(status, "#666")
@@ -264,17 +266,25 @@ def register():
             role = 'patient'
 
         db = get_db()
-        if db.execute('SELECT id FROM users WHERE username=?', (username,)).fetchone():
-            flash('Username taken', 'error'); db.close(); return redirect(url_for('register'))
-        if db.execute('SELECT id FROM users WHERE email=?', (email,)).fetchone():
-            flash('Email registered', 'error'); db.close(); return redirect(url_for('register'))
+        try:
+            if db_exec(db, 'SELECT id FROM users WHERE username=?', (username,)).fetchone():
+                flash('Username taken', 'error')
+                return redirect(url_for('register'))
+            if db_exec(db, 'SELECT id FROM users WHERE email=?', (email,)).fetchone():
+                flash('Email registered', 'error')
+                return redirect(url_for('register'))
+            db_exec(db,
+                'INSERT INTO users (username,email,password_hash,role,hipaa_consent,hipaa_consent_date)'
+                ' VALUES (?,?,?,?,?,?)',
+                (username, email, generate_password_hash(password), role, 1,
+                 datetime.utcnow().isoformat()))
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
 
-        db.execute(
-            'INSERT INTO users (username,email,password_hash,role,hipaa_consent,hipaa_consent_date)'
-            ' VALUES (?,?,?,?,?,?)',
-            (username, email, generate_password_hash(password), role, 1, datetime.utcnow().isoformat())
-        )
-        db.commit(); db.close()
         flash('Registration successful!', 'success')
         return redirect(url_for('login'))
     return render_template('register.html', t=t)
@@ -288,7 +298,7 @@ def login():
         if not hipaa:
             flash('HIPAA acknowledgement required', 'error'); return redirect(url_for('login'))
         db   = get_db()
-        user = db.execute('SELECT * FROM users WHERE username=?', (username,)).fetchone()
+        user = db_exec(db, 'SELECT * FROM users WHERE username=?', (username,)).fetchone()
         db.close()
         if user and check_password_hash(user['password_hash'], password):
             session['user_id']  = user['id']
@@ -310,13 +320,13 @@ def logout():
 def dashboard():
     db = get_db()
     if session['role'] == 'doctor':
-        preds    = db.execute(
+        preds    = db_exec(db,
             'SELECT p.*, u.username as uname FROM predictions p '
             'JOIN users u ON p.user_id=u.id ORDER BY p.created_at DESC').fetchall()
-        patients = db.execute(
+        patients = db_exec(db,
             "SELECT id,username,email,created_at FROM users WHERE role='patient'"
             " ORDER BY created_at DESC").fetchall()
-        appointments = db.execute(
+        appointments = db_exec(db,
             'SELECT a.*, u.username as pname FROM appointments a '
             'JOIN users u ON a.patient_id=u.id ORDER BY a.appt_date ASC, a.appt_time ASC'
         ).fetchall()
@@ -328,10 +338,10 @@ def dashboard():
                                model_metrics=asd_model.metrics,
                                doctors=RECOMMENDED_DOCTORS, t=t)
     else:
-        preds = db.execute(
+        preds = db_exec(db,
             'SELECT * FROM predictions WHERE user_id=? ORDER BY created_at DESC',
             (session['user_id'],)).fetchall()
-        appointments = db.execute(
+        appointments = db_exec(db,
             'SELECT * FROM appointments WHERE patient_id=? ORDER BY appt_date ASC, appt_time ASC',
             (session['user_id'],)).fetchall()
         db.close()
@@ -362,17 +372,16 @@ def questionnaire():
             report_path = _make_pdf(session['username'], raw, prob, threshold,
                                     label, confidence, top_features, plot_path, lang)
             db = get_db()
-            db.execute(
-                '''INSERT INTO predictions
-                   (user_id, username, responses, asd_probability, asd_threshold,
-                    prediction_label, confidence, top_features, shap_plot, report_path)
-                   VALUES (?,?,?,?,?,?,?,?,?,?)''',
+            pred_id = db_insert_returning_id(db,
+                'INSERT INTO predictions'
+                ' (user_id, username, responses, asd_probability, asd_threshold,'
+                '  prediction_label, confidence, top_features, shap_plot, report_path)'
+                ' VALUES (?,?,?,?,?,?,?,?,?,?)',
                 (session['user_id'], session['username'], json.dumps(raw),
                  round(prob * 100, 2), round(threshold * 100, 2),
                  label, confidence, json.dumps(top_features),
                  os.path.basename(plot_path), report_path))
             db.commit()
-            pred_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
             db.close()
             return redirect(url_for('results', pred_id=pred_id))
         except Exception as e:
@@ -389,7 +398,7 @@ def questionnaire():
 @login_required
 def results(pred_id):
     db   = get_db()
-    pred = db.execute('SELECT * FROM predictions WHERE id=?', (pred_id,)).fetchone()
+    pred = db_exec(db, 'SELECT * FROM predictions WHERE id=?', (pred_id,)).fetchone()
     db.close()
     if not pred:
         flash('Not found', 'error'); return redirect(url_for('dashboard'))
@@ -407,7 +416,7 @@ def results(pred_id):
 @login_required
 def download_report(pred_id):
     db   = get_db()
-    pred = db.execute('SELECT * FROM predictions WHERE id=?', (pred_id,)).fetchone()
+    pred = db_exec(db, 'SELECT * FROM predictions WHERE id=?', (pred_id,)).fetchone()
     db.close()
     if not pred:
         flash('Not found', 'error'); return redirect(url_for('dashboard'))
@@ -426,29 +435,16 @@ def doctor_profile(doctor_idx):
         flash('Doctor not found', 'error'); return redirect(url_for('dashboard'))
     doc = RECOMMENDED_DOCTORS[doctor_idx]
     db = get_db()
-    appointments = db.execute(
+    appointments = db_exec(db,
         'SELECT * FROM appointments WHERE doctor_name=? ORDER BY appt_date ASC',
         (doc['name'],)).fetchall()
     db.close()
     return render_template('doctor_profile.html', doc=doc, doc_idx=doctor_idx,
                            appointments=appointments, t=t)
 
-# =============================================================================
-# ★ NEW API: GET AVAILABLE SLOTS
-# =============================================================================
 @app.route('/api/available_slots')
 @login_required
 def available_slots():
-    """
-    Called by JavaScript when a patient picks a date in the booking modal.
-    Returns only the slots NOT already booked for that doctor+date.
-
-    HOW SLOT BLOCKING WORKS:
-    - ALL_SLOTS = every possible time in a day
-    - We query appointments WHERE doctor_name=? AND appt_date=? AND status IN ('pending','confirmed')
-    - We subtract those from ALL_SLOTS
-    - Frontend renders only what's returned here → booked slots are INVISIBLE
-    """
     doctor_name = request.args.get('doctor_name', '')
     date        = request.args.get('date', '')
 
@@ -459,37 +455,19 @@ def available_slots():
         return jsonify({'available': ALL_SLOTS})
 
     db = get_db()
-    rows = db.execute(
+    rows = db_exec(db,
         "SELECT appt_time FROM appointments "
         "WHERE doctor_name=? AND appt_date=? AND status IN ('pending','confirmed')",
-        (doctor_name, date)
-    ).fetchall()
+        (doctor_name, date)).fetchall()
     db.close()
 
-    booked    = {row['appt_time'] for row in rows}    # set for fast lookup
+    booked    = {row['appt_time'] for row in rows}
     available = [s for s in ALL_SLOTS if s not in booked]
     return jsonify({'available': available})
 
-# =============================================================================
-# ★ UPDATED: BOOK APPOINTMENT — conflict check + emails
-# =============================================================================
 @app.route('/book_appointment', methods=['POST'])
 @login_required
 def book_appointment():
-    """
-    SLOT CONFLICT CHECK (server-side safety net):
-    Even if the JS already filtered slots, we re-check in the DB.
-    If someone books the same slot in two browser tabs simultaneously,
-    only the first INSERT succeeds — the second sees the existing row and
-    returns an error flash.
-
-    EMAIL FLOW:
-    After successful booking:
-      1. Fetch patient email from users table
-      2. doctor_email comes from the form (hidden input = doc.email)
-      3. send_email([patient_email, doctor_email], subject, html)
-         → both get the "Appointment Pending" email
-    """
     doctor_name  = request.form.get('doctor_name', '')
     doctor_email = request.form.get('doctor_email', '')
     appt_date    = request.form.get('appt_date', '')
@@ -503,37 +481,31 @@ def book_appointment():
 
     db = get_db()
 
-    # SERVER-SIDE SLOT CONFLICT CHECK
-    existing = db.execute(
+    existing = db_exec(db,
         "SELECT id FROM appointments "
         "WHERE doctor_name=? AND appt_date=? AND appt_time=?"
         " AND status IN ('pending','confirmed')",
-        (doctor_name, appt_date, appt_time)
-    ).fetchone()
+        (doctor_name, appt_date, appt_time)).fetchone()
 
     if existing:
         flash(f'The {appt_time} slot on {appt_date} is already booked. Please choose another time.', 'error')
         db.close()
         return redirect(request.referrer or url_for('dashboard'))
 
-    # Insert with status='pending'
-    db.execute(
-        '''INSERT INTO appointments
-           (patient_id, patient_name, doctor_name, doctor_email,
-            appt_date, appt_time, appt_type, notes, status)
-           VALUES (?,?,?,?,?,?,?,?,?)''',
+    db_exec(db,
+        'INSERT INTO appointments'
+        ' (patient_id, patient_name, doctor_name, doctor_email,'
+        '  appt_date, appt_time, appt_type, notes, status)'
+        ' VALUES (?,?,?,?,?,?,?,?,?)',
         (session['user_id'], session['username'],
          doctor_name, doctor_email,
-         appt_date, appt_time, appt_type, notes, 'pending')
-    )
+         appt_date, appt_time, appt_type, notes, 'pending'))
     db.commit()
 
-    # Fetch patient email for notification
-    patient_row = db.execute('SELECT email FROM users WHERE id=?',
-                              (session['user_id'],)).fetchone()
+    patient_row = db_exec(db, 'SELECT email FROM users WHERE id=?',
+                          (session['user_id'],)).fetchone()
     db.close()
 
-    # SEND EMAILS TO BOTH PATIENT AND DOCTOR
     recipients = []
     if patient_row and patient_row['email']:
         recipients.append(patient_row['email'])
@@ -549,50 +521,32 @@ def book_appointment():
           f' Confirmation email sent.', 'success')
     return redirect(url_for('dashboard'))
 
-# =============================================================================
-# CANCEL APPOINTMENT
-# =============================================================================
 @app.route('/cancel_appointment/<int:appt_id>', methods=['POST'])
 @login_required
 def cancel_appointment(appt_id):
-    """
-    Sets status='cancelled' → this frees the slot so available_slots API
-    will include it again for future bookings.
-    """
     db   = get_db()
-    appt = db.execute('SELECT * FROM appointments WHERE id=?', (appt_id,)).fetchone()
+    appt = db_exec(db, 'SELECT * FROM appointments WHERE id=?', (appt_id,)).fetchone()
     if appt and (appt['patient_id'] == session['user_id'] or session['role'] == 'doctor'):
-        db.execute("UPDATE appointments SET status='cancelled' WHERE id=?", (appt_id,))
+        db_exec(db, "UPDATE appointments SET status='cancelled' WHERE id=?", (appt_id,))
         db.commit()
         flash('Appointment cancelled.', 'info')
     db.close()
     return redirect(request.referrer or url_for('dashboard'))
 
-# =============================================================================
-# ★ UPDATED: CONFIRM APPOINTMENT — doctor action + email to patient
-# =============================================================================
 @app.route('/confirm_appointment/<int:appt_id>', methods=['POST'])
 @role_required('doctor')
 def confirm_appointment(appt_id):
-    """
-    Doctor clicks "Confirm" on an appointment.
-    1. DB: status = 'confirmed'
-    2. Fetch appointment + patient email
-    3. send_email to patient (and CC doctor)
-       → patient gets "Your appointment is CONFIRMED" email
-    """
     db = get_db()
-    db.execute("UPDATE appointments SET status='confirmed' WHERE id=?", (appt_id,))
+    db_exec(db, "UPDATE appointments SET status='confirmed' WHERE id=?", (appt_id,))
     db.commit()
 
-    appt        = db.execute('SELECT * FROM appointments WHERE id=?', (appt_id,)).fetchone()
+    appt        = db_exec(db, 'SELECT * FROM appointments WHERE id=?', (appt_id,)).fetchone()
     patient_row = None
     if appt:
-        patient_row = db.execute('SELECT email FROM users WHERE id=?',
-                                  (appt['patient_id'],)).fetchone()
+        patient_row = db_exec(db, 'SELECT email FROM users WHERE id=?',
+                              (appt['patient_id'],)).fetchone()
     db.close()
 
-    # SEND CONFIRMATION EMAIL
     if appt and patient_row and patient_row['email']:
         recipients = [patient_row['email']]
         if appt['doctor_email']:
@@ -623,7 +577,7 @@ CHATBOT_KB = {
     'privacy': 'Data encrypted and handled under HIPAA regulations.',
     'languages': 'Supports English, Hindi, and Marathi.',
     'doctors': 'Specialized doctors in Pune: Child Psychologists, Pediatric Psychiatrists, Developmental Pediatricians.',
-    'hello': 'Hello! I\'m the AutexAI Care assistant. Ask me about autism, assessments, or appointments.',
+    'hello': "Hello! I'm the AutexAI Care assistant. Ask me about autism, assessments, or appointments.",
     'hi': 'Hello! How can I help you today?',
     'help': 'I can help with: autism symptoms, ASD screening, booking appointments, understanding results.',
     'what is autexai': 'AutexAI Care is an early ASD screening platform using ensemble ML to assess autism risk.',
@@ -660,7 +614,7 @@ def chat_api():
     return jsonify({'reply': get_chatbot_response(message)})
 
 # =============================================================================
-# PDF REPORT GENERATOR (unchanged from v3)
+# PDF REPORT GENERATOR — model logic UNTOUCHED
 # =============================================================================
 def _make_pdf(username, raw, prob, threshold, label, confidence, top_features, shap_plot, lang='en'):
     from reportlab.lib.pagesizes import letter
