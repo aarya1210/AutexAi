@@ -51,49 +51,41 @@ os.makedirs(config.REPORTS_FOLDER, exist_ok=True)
 os.makedirs(os.path.dirname(config.DATABASE), exist_ok=True)
 
 # ── LOAD ML MODEL ─────────────────────────────────────────────────────────────
+# Wrapped in try/except: if the .pkl was built on a different numpy/Python
+# version (the numpy BitGenerator error) the app still starts and serves
+# traffic.  MODEL_OK stays False so the questionnaire shows a graceful error
+# instead of crashing gunicorn before it can bind the port.
 asd_model = ASDModel()
 MODEL_OK = False
 if os.path.exists(config.MODEL_PATH):
-    asd_model.load(config.MODEL_PATH)
-    MODEL_OK = True
+    try:
+        asd_model.load(config.MODEL_PATH)
+        MODEL_OK = True
+    except Exception as _model_load_err:
+        import logging as _lg
+        _lg.getLogger(__name__).error(
+            "Could not load autism_model.pkl: %s — "
+            "app will start but predictions are disabled until retrained.",
+            _model_load_err,
+        )
 
-# ============================================================
-# HOW TO APPLY THIS PATCH TO app.py
-# ============================================================
-# In your app.py, find this OLD block (around line 60):
-#
-#     with app.app_context():
-#         init_db()
-#
-# DELETE those two lines and REPLACE them with the block below.
-# Everything else in app.py stays the same.
-# ============================================================
-
-
-# ── LAZY DATABASE INITIALISATION ─────────────────────────────────────────────
-# DO NOT call init_db() here at module level.
-# Calling it at import time causes gunicorn to crash with
-#   "psycopg2.OperationalError: Name or service not known"
-# because the Supabase DNS is not yet resolvable during the
-# cold-start window before gunicorn binds the port.
-#
-# This before_request hook runs init_db() exactly ONCE — on the
-# very first HTTP request, after gunicorn has fully started and
-# the network is available.  A threading.Lock stops multiple
-# workers from racing on the same first request.
-
-import threading
-_db_initialised = False
-_db_lock = threading.Lock()
+# ── LAZY DATABASE INITIALISATION ──────────────────────────────────────────────
+# DO NOT call init_db() at module level — it crashes gunicorn when the
+# Supabase DNS is not yet reachable during the cold-start window.
+# This before_request hook runs init_db() exactly once on the first HTTP
+# request, after gunicorn has fully bound the port and the network is up.
+import threading as _threading
+_db_ready = False
+_db_lock  = _threading.Lock()
 
 @app.before_request
-def ensure_db():
-    global _db_initialised
-    if not _db_initialised:
+def _ensure_db():
+    global _db_ready
+    if not _db_ready:
         with _db_lock:
-            if not _db_initialised:   # double-checked locking
+            if not _db_ready:
                 init_db()
-                _db_initialised = True
+                _db_ready = True
 
 # =============================================================================
 # EMAIL HELPER
