@@ -37,15 +37,42 @@ os.makedirs(os.path.dirname(config.DATABASE), exist_ok=True)
 
 # ── LOAD ML MODEL ─────────────────────────────────────────────────────────────
 # Wrapped in try/except so a bad .pkl does not crash gunicorn before port bind
+import logging as _lg
+_model_logger = _lg.getLogger(__name__)
+
 asd_model = ASDModel()
 MODEL_OK = False
-if os.path.exists(config.MODEL_PATH):
-    try:
-        asd_model.load(config.MODEL_PATH)
-        MODEL_OK = True
-    except Exception as _e:
-        import logging as _lg
-        _lg.getLogger(__name__).error("Could not load model: %s", _e)
+
+def _try_load_model():
+    global MODEL_OK
+    if os.path.exists(config.MODEL_PATH):
+        try:
+            asd_model.load(config.MODEL_PATH)
+            MODEL_OK = True
+            _model_logger.info("Model loaded from %s", config.MODEL_PATH)
+            return True
+        except Exception as _e:
+            _model_logger.error("Could not load model: %s", _e)
+    return False
+
+def _try_train_model():
+    """Auto-train from CSV if .pkl is missing or failed to load."""
+    global MODEL_OK
+    if os.path.exists(config.DATASET_PATH):
+        try:
+            _model_logger.info("Training model from dataset (pkl not found)...")
+            os.makedirs(os.path.dirname(config.MODEL_PATH), exist_ok=True)
+            asd_model.train(config.DATASET_PATH)
+            asd_model.save(config.MODEL_PATH)
+            MODEL_OK = True
+            _model_logger.info("Model trained and saved to %s", config.MODEL_PATH)
+        except Exception as _e:
+            _model_logger.error("Auto-training failed: %s", _e)
+    else:
+        _model_logger.error("Dataset not found at %s — cannot auto-train", config.DATASET_PATH)
+
+if not _try_load_model():
+    _try_train_model()
 
 # ── LAZY DATABASE INIT ────────────────────────────────────────────────────────
 _db_ready = False
