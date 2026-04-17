@@ -39,6 +39,14 @@
     </div>
   </div>
 
+  {# ── SHAP chart right below probability scores ── #}
+  {% if shap_data_uri %}
+  <div class="result-section">
+    <h3>{% if session.get('lang')=='hi' %}विश्लेषण चार्ट (Explainable AI){% elif session.get('lang')=='mr' %}विश्लेषण चार्ट (Explainable AI){% else %}Behavioral Analysis Chart (Explainable AI — SHAP){% endif %}</h3>
+    <img src="{{ shap_data_uri }}" alt="SHAP Explainability Analysis" class="shap-img" style="max-width:100%;border-radius:10px;margin-top:8px;">
+  </div>
+  {% endif %}
+
   {% if top_features %}
   <div class="result-section">
     <h3>{% if session.get('lang')=='hi' %}प्रमुख व्यवहार संकेतक{% elif session.get('lang')=='mr' %}प्रमुख वर्तन संकेतक{% else %}Key Behavioral Indicators{% endif %}</h3>
@@ -52,13 +60,6 @@
       </div>
       {% endfor %}
     </div>
-  </div>
-  {% endif %}
-
-  {% if shap_img %}
-  <div class="result-section">
-    <h3>{% if session.get('lang')=='hi' %}विश्लेषण चार्ट{% elif session.get('lang')=='mr' %}विश्लेषण चार्ट{% else %}Analysis Chart{% endif %}</h3>
-    <img src="{{ url_for('static', filename='reports/' + shap_img) }}" alt="SHAP Analysis" class="shap-img">
   </div>
   {% endif %}
 
@@ -90,3 +91,4 @@
   </p>
 </div>
 {% endblock %}
+  
