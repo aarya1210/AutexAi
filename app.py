@@ -10,6 +10,7 @@ FIXES IN THIS VERSION:
   - init_db() moved to @app.before_request (lazy) — no crash at cold-start
   - Model load wrapped in try/except — port binds even if .pkl has issues
   - Model logic (predict, shap, ensemble) is completely UNTOUCHED
+  - Fixed IndentationError in questionnaire() — removed duplicate POST block
 """
 
 import os, sys, json, time, random, smtplib, threading
@@ -36,7 +37,6 @@ os.makedirs(config.REPORTS_FOLDER, exist_ok=True)
 os.makedirs(os.path.dirname(config.DATABASE), exist_ok=True)
 
 # ── LOAD ML MODEL ─────────────────────────────────────────────────────────────
-# Wrapped in try/except so a bad .pkl does not crash gunicorn before port bind
 import logging as _lg
 _model_logger = _lg.getLogger(__name__)
 
@@ -91,35 +91,17 @@ def _ensure_db():
 # DB HELPER  — works for both SQLite (?) and psycopg2 (%s)
 # =============================================================================
 def db_exec(conn, sql, params=()):
-    """
-    Execute a SQL statement on either a sqlite3 or psycopg2 connection.
-
-    sqlite3  uses ? placeholders and supports conn.execute() directly.
-    psycopg2 uses %s placeholders and requires a cursor.
-
-    This helper normalises both so every caller looks the same:
-        cur = db_exec(db, 'SELECT ...', (val,))
-        row = cur.fetchone()
-    """
     if _is_pg(conn):
-        # Replace every ? with %s for psycopg2
         sql = sql.replace('?', '%s')
         cur = conn.cursor()
         cur.execute(sql, params)
         return cur
     else:
-        # sqlite3 connection.execute() returns a cursor directly
         return conn.execute(sql, params)
 
 
 def db_insert_returning_id(conn, sql, params=()):
-    """
-    INSERT and return the new row's id.
-    PostgreSQL: uses RETURNING id clause.
-    SQLite:     uses lastrowid on the cursor.
-    """
     if _is_pg(conn):
-        # Strip any trailing semicolon, add RETURNING id
         sql = sql.rstrip(';').rstrip() + ' RETURNING id'
         sql = sql.replace('?', '%s')
         cur = conn.cursor()
@@ -379,47 +361,38 @@ def dashboard():
 @app.route('/questionnaire', methods=['GET', 'POST'])
 @role_required('patient')
 def questionnaire():
-    # ── MODEL LOGIC — DO NOT CHANGE ──────────────────────────────────────────
     lang = get_lang()
     if not MODEL_OK:
-        flash('Model not ready', 'error'); return redirect(url_for('dashboard'))
-
-    if request.method == 'POST':
-        try:
-            # ─────────────────────────────────────────────────────────────────────────────
-# PATCH 2  ·  questionnaire()  POST block — replace lines ~387-417
-# ─────────────────────────────────────────────────────────────────────────────
- 
-# REPLACE the existing questionnaire() POST try block with:
- 
+        flash('Model not ready', 'error')
+        return redirect(url_for('dashboard'))
 
     if request.method == 'POST':
         try:
             import base64 as _b64
- 
+
             raw = {}
             questions = QUESTIONS[lang]
             for q in questions:
                 raw[q['key']] = int(request.form.get(q['key'], 0))
- 
+
             # ── MODEL LOGIC — UNTOUCHED ───────────────────────────────────────
             prob, threshold, label, confidence = asd_model.predict(raw)
             contributions, plot_path = asd_model.generate_shap_plot(
                 raw, config.REPORTS_FOLDER, 'shap')
             top_features = [(f, round(v, 4)) for f, v, _ in contributions]
             # ─────────────────────────────────────────────────────────────────
- 
+
             # Read SHAP PNG → base64 so it survives Render restarts
             shap_b64 = None
             if plot_path and os.path.exists(plot_path):
                 with open(plot_path, 'rb') as _f:
                     shap_b64 = _b64.b64encode(_f.read()).decode('utf-8')
- 
+
             # Build PDF in-memory → base64 (also writes to disk as cache)
             report_path, report_b64 = _make_pdf_b64(
                 session['username'], raw, prob, threshold,
                 label, confidence, top_features, plot_path, lang)
- 
+
             db = get_db()
             pred_id = db_insert_returning_id(db,
                 'INSERT INTO predictions'
@@ -442,8 +415,6 @@ def questionnaire():
             flash(f'Error: {str(e)}', 'error')
             return redirect(url_for('questionnaire'))
 
-    # ─────────────────────────────────────────────────────────────────────────
-
     questions = list(QUESTIONS[lang])
     random.shuffle(questions)
     return render_template('questionnaire.html', questions=questions, lang=lang, t=t)
@@ -453,7 +424,7 @@ def questionnaire():
 @login_required
 def results(pred_id):
     import base64 as _b64
- 
+
     db   = get_db()
     pred = db_exec(db, 'SELECT * FROM predictions WHERE id=?', (pred_id,)).fetchone()
     db.close()
@@ -461,26 +432,23 @@ def results(pred_id):
         flash('Not found', 'error'); return redirect(url_for('dashboard'))
     if session['role'] == 'patient' and pred['user_id'] != session['user_id']:
         flash('Access denied', 'error'); return redirect(url_for('dashboard'))
- 
+
     top_features = json.loads(pred['top_features']) if pred['top_features'] else []
     top_labeled  = [(FEATURE_LABELS.get(f, f), v) for f, v in top_features]
     show_doctors = pred['asd_probability'] >= pred['asd_threshold']
- 
+
     # ── Build a data-URI for the SHAP image ──────────────────────────────────
-    # Priority 1: base64 stored in DB  (works on Render after any restart)
-    # Priority 2: file still exists on disk (dev / same-instance)
-    # Priority 3: regenerate on-the-fly from stored responses
     shap_data_uri = None
- 
+
     if pred.get('shap_plot_b64'):
         shap_data_uri = 'data:image/png;base64,' + pred['shap_plot_b64']
- 
+
     elif pred.get('shap_plot') and os.path.exists(
             os.path.join(config.REPORTS_FOLDER, pred['shap_plot'])):
         with open(os.path.join(config.REPORTS_FOLDER, pred['shap_plot']), 'rb') as _f:
             b64 = _b64.b64encode(_f.read()).decode('utf-8')
         shap_data_uri = 'data:image/png;base64,' + b64
- 
+
     elif pred.get('responses') and MODEL_OK:
         try:
             raw = json.loads(pred['responses'])
@@ -490,7 +458,6 @@ def results(pred_id):
                 with open(plot_path, 'rb') as _f:
                     b64 = _b64.b64encode(_f.read()).decode('utf-8')
                 shap_data_uri = 'data:image/png;base64,' + b64
-                # Persist b64 back to DB so next load is instant
                 try:
                     db2 = get_db()
                     db_exec(db2,
@@ -501,19 +468,17 @@ def results(pred_id):
                     pass
         except Exception:
             pass
-    # ─────────────────────────────────────────────────────────────────────────
- 
+
     return render_template('results.html', pred=pred, top_features=top_labeled,
                            shap_data_uri=shap_data_uri, show_doctors=show_doctors,
                            doctors=RECOMMENDED_DOCTORS, t=t)
 
- 
 
 @app.route('/download/<int:pred_id>')
 @login_required
 def download_report(pred_id):
     import base64 as _b64, io
- 
+
     db   = get_db()
     pred = db_exec(db, 'SELECT * FROM predictions WHERE id=?', (pred_id,)).fetchone()
     db.close()
@@ -521,10 +486,10 @@ def download_report(pred_id):
         flash('Not found', 'error'); return redirect(url_for('dashboard'))
     if session['role'] == 'patient' and pred['user_id'] != session['user_id']:
         flash('Access denied', 'error'); return redirect(url_for('dashboard'))
- 
+
     fname = f'asd_report_{pred["username"]}_{pred_id}.pdf'
- 
-    # Priority 1: base64 stored in DB  (always available on Render)
+
+    # Priority 1: base64 stored in DB
     if pred.get('report_b64'):
         pdf_bytes = _b64.b64decode(pred['report_b64'])
         return send_file(
@@ -532,22 +497,21 @@ def download_report(pred_id):
             mimetype='application/pdf',
             as_attachment=True,
             download_name=fname)
- 
-    # Priority 2: file still on disk (dev / same Render instance)
+
+    # Priority 2: file still on disk
     rp = pred.get('report_path')
     if rp and os.path.exists(rp):
         return send_file(rp, as_attachment=True, download_name=fname)
- 
+
     # Priority 3: regenerate from stored responses
     if pred.get('responses') and MODEL_OK:
         try:
             raw          = json.loads(pred['responses'])
             top_features = json.loads(pred['top_features']) if pred['top_features'] else []
- 
-            # Regenerate SHAP plot for the PDF
+
             _, plot_path = asd_model.generate_shap_plot(
                 raw, config.REPORTS_FOLDER, 'shap_regen')
- 
+
             report_path, report_b64 = _make_pdf_b64(
                 pred['username'], raw,
                 pred['asd_probability'] / 100,
@@ -556,8 +520,7 @@ def download_report(pred_id):
                 pred['confidence'],
                 top_features,
                 plot_path)
- 
-            # Persist b64 back to DB so future downloads are instant
+
             try:
                 db2 = get_db()
                 db_exec(db2,
@@ -566,7 +529,7 @@ def download_report(pred_id):
                 db2.commit(); db2.close()
             except Exception:
                 pass
- 
+
             pdf_bytes = _b64.b64decode(report_b64)
             return send_file(
                 io.BytesIO(pdf_bytes),
@@ -575,7 +538,7 @@ def download_report(pred_id):
                 download_name=fname)
         except Exception as e:
             import traceback; traceback.print_exc()
- 
+
     flash('PDF not found and could not be regenerated.', 'error')
     return redirect(url_for('dashboard'))
 
@@ -752,7 +715,7 @@ def chat_api():
     return jsonify({'reply': get_chatbot_response(message)})
 
 # =============================================================================
-# PDF REPORT GENERATOR — model logic UNTOUCHED
+# PDF REPORT GENERATOR
 # =============================================================================
 def _make_pdf(username, raw, prob, threshold, label, confidence, top_features, shap_plot, lang='en'):
     from reportlab.lib.pagesizes import letter
@@ -836,7 +799,7 @@ def _make_pdf(username, raw, prob, threshold, label, confidence, top_features, s
         ('BOTTOMPADDING',(0,0),(-1,-1),7),('TOPPADDING',(0,0),(-1,-1),7),
     ]))
     elems.append(ft); elems.append(Spacer(1, 0.2*inch))
-    if os.path.exists(shap_plot):
+    if shap_plot and os.path.exists(shap_plot):
         elems.append(Paragraph('Behavioral Analysis Chart', h2_s))
         elems.append(Image(shap_plot, width=6.5*inch, height=3.4*inch))
         elems.append(Spacer(1, 0.15*inch))
@@ -848,13 +811,13 @@ def _make_pdf(username, raw, prob, threshold, label, confidence, top_features, s
         disc_s))
     pdf_doc.build(elems)
     return filepath
-# ---------- helper: PDF → base64 (in-memory, no disk required) ----------
+
+
 def _make_pdf_b64(username, raw, prob, threshold, label, confidence,
                   top_features, shap_plot_path, lang='en'):
     """
-    Identical to _make_pdf() but writes to a BytesIO buffer and returns
-    (filepath, base64_string).  The file is still written to disk as a
-    local cache; the b64 string is what gets stored in Supabase/PostgreSQL.
+    Builds PDF into a BytesIO buffer and returns (filepath, base64_string).
+    The file is also written to disk as a local cache.
     """
     import io, base64
     from reportlab.lib.pagesizes import letter
@@ -863,7 +826,7 @@ def _make_pdf_b64(username, raw, prob, threshold, label, confidence,
     from reportlab.platypus import (SimpleDocTemplate, Table, TableStyle,
                                      Paragraph, Spacer, Image, HRFlowable)
     from reportlab.lib.units import inch
- 
+
     buf = io.BytesIO()
     pdf_doc = SimpleDocTemplate(buf, pagesize=letter,
                                 leftMargin=0.75*inch, rightMargin=0.75*inch,
@@ -948,10 +911,10 @@ def _make_pdf_b64(username, raw, prob, threshold, label, confidence,
         'Only a licensed specialist can diagnose ASD. All data handled per HIPAA.',
         disc_s))
     pdf_doc.build(elems)
- 
+
     pdf_bytes = buf.getvalue()
     b64 = base64.b64encode(pdf_bytes).decode('utf-8')
- 
+
     # Also write to disk as local cache (best-effort)
     fname    = f'asd_report_{username}_{int(time.time())}.pdf'
     filepath = os.path.join(config.REPORTS_FOLDER, fname)
@@ -961,7 +924,9 @@ def _make_pdf_b64(username, raw, prob, threshold, label, confidence,
             fh.write(pdf_bytes)
     except Exception:
         filepath = None   # disk write failed — that's OK, we have b64
- 
+
     return filepath, b64
+
+
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=5000)
