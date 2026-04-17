@@ -566,6 +566,15 @@ def available_slots():
     available = [s for s in ALL_SLOTS if s not in booked]
     return jsonify({'available': available})
 
+@app.route('/doctor_profile/<int:doctor_idx>')
+@login_required
+def doctor_profile(doctor_idx):
+    if doctor_idx < 0 or doctor_idx >= len(RECOMMENDED_DOCTORS):
+        flash('Doctor not found.', 'error')
+        return redirect(url_for('dashboard'))
+    doc = RECOMMENDED_DOCTORS[doctor_idx]
+    return render_template('doctor_profile.html', doc=doc, doctor_idx=doctor_idx)
+
 @app.route('/book_appointment', methods=['POST'])
 @login_required
 def book_appointment():
@@ -930,3 +939,4 @@ def _make_pdf_b64(username, raw, prob, threshold, label, confidence,
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=5000)
+
