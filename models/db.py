@@ -90,6 +90,8 @@ def init_db():
                     top_features     TEXT,
                     shap_plot        TEXT,
                     report_path      TEXT,
+                    shap_plot_b64    TEXT,
+                    report_b64       TEXT,
                     created_at       TEXT DEFAULT (to_char(now(), 'YYYY-MM-DD HH24:MI:SS')),
                     FOREIGN KEY (user_id) REFERENCES users(id)
                 )
@@ -110,6 +112,13 @@ def init_db():
                     FOREIGN KEY (patient_id) REFERENCES users(id)
                 )
             """)
+            # Migration: add base64 columns to existing tables if they don't exist yet
+            for col in ('shap_plot_b64', 'report_b64'):
+                try:
+                    c.execute(f"ALTER TABLE predictions ADD COLUMN {col} TEXT")
+                    log.info("init_db: added column predictions.%s", col)
+                except Exception:
+                    pass  # column already exists — ignore
         else:
             c.execute("""
                 CREATE TABLE IF NOT EXISTS users (
@@ -136,6 +145,8 @@ def init_db():
                     top_features     TEXT,
                     shap_plot        TEXT,
                     report_path      TEXT,
+                    shap_plot_b64    TEXT,
+                    report_b64       TEXT,
                     created_at       TEXT DEFAULT (datetime('now')),
                     FOREIGN KEY (user_id) REFERENCES users(id)
                 )
@@ -156,6 +167,15 @@ def init_db():
                     FOREIGN KEY (patient_id) REFERENCES users(id)
                 )
             """)
+            # Migration: add base64 columns to existing SQLite tables if missing
+            existing_cols = [row[1] for row in c.execute("PRAGMA table_info(predictions)")]
+            for col in ('shap_plot_b64', 'report_b64'):
+                if col not in existing_cols:
+                    try:
+                        c.execute(f"ALTER TABLE predictions ADD COLUMN {col} TEXT")
+                        log.info("init_db: added column predictions.%s", col)
+                    except Exception:
+                        pass
 
         conn.commit()
         log.info("init_db: schema ready.")
