@@ -2,32 +2,51 @@
 AutexAI Care — app.py
 =====================
 FIXES IN THIS VERSION:
-  - All db.execute() calls replaced with a db_exec() helper that:
-      * Creates a cursor (psycopg2 needs this; sqlite3 connection has execute but cursor is cleaner)
-      * Converts ? → %s placeholders automatically for psycopg2
-      * Returns the cursor so .fetchone() / .fetchall() work the same way
-  - last_insert_rowid() replaced with RETURNING id (PostgreSQL) or lastrowid (SQLite)
-  - init_db() moved to @app.before_request (lazy) — no crash at cold-start
-  - Model load wrapped in try/except — port binds even if .pkl has issues
-  - Model logic (predict, shap, ensemble) is completely UNTOUCHED
-  - Fixed IndentationError in questionnaire() — removed duplicate POST block
+- All db.execute() calls replaced with a db_exec() helper that:
+  * Creates a cursor (psycopg2 needs this; sqlite3 connection has execute but cursor is cleaner)
+  * Converts ? → %s placeholders automatically for psycopg2
+  * Returns the cursor so .fetchone() / .fetchall() work the same way
+- last_insert_rowid() replaced with RETURNING id (PostgreSQL) or lastrowid (SQLite)
+- init_db() moved to @app.before_request (lazy) — no crash at cold-start
+- Model load wrapped in try/except — port binds even if .pkl has issues
+- Model logic (predict, shap, ensemble) is completely UNTOUCHED
+- Fixed IndentationError in questionnaire() — removed duplicate POST block
+
+FIX (np.float64 PostgreSQL error):
+- Added NumpyEncoder JSON encoder to handle all NumPy types in json.dumps()
+- Wrapped asd_probability and asd_threshold with float() before DB insert
+- Wrapped label and confidence with str() before DB insert
+- Wrapped top_features values with float() to avoid np.float64 in json.dumps
+- These are the ONLY changes from the original — zero model logic touched
 """
 
 import os, sys, json, time, random, smtplib, threading
+import numpy as np                          # <-- needed for NumpyEncoder
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from datetime import datetime
 from functools import wraps
-
 from flask import (Flask, render_template, request, redirect, url_for,
                    flash, session, send_file, jsonify)
 from werkzeug.security import generate_password_hash, check_password_hash
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
 import config
 from models.db import get_db, init_db, _is_pg
 from models.ml_model import ASDModel, QUESTIONS, FEATURE_LABELS, RECOMMENDED_DOCTORS
+
+# ── NUMPY JSON ENCODER ────────────────────────────────────────────────────────
+# FIX: PostgreSQL/psycopg2 cannot handle numpy scalar types (np.float64, np.int64, etc.)
+# This encoder is used in all json.dumps() calls to safely convert them.
+class NumpyEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super().default(obj)
 
 # ── FLASK APP SETUP ───────────────────────────────────────────────────────────
 app = Flask(__name__)
@@ -88,17 +107,14 @@ def _ensure_db():
                 _db_ready = True
 
 # =============================================================================
-# DB HELPER  — works for both SQLite (?) and psycopg2 (%s)
+# DB HELPER — works for both SQLite (?) and psycopg2 (%s)
 # =============================================================================
 def db_exec(conn, sql, params=()):
     if _is_pg(conn):
         sql = sql.replace('?', '%s')
-        cur = conn.cursor()
-        cur.execute(sql, params)
-        return cur
-    else:
-        return conn.execute(sql, params)
-
+    cur = conn.cursor()
+    cur.execute(sql, params)
+    return cur
 
 def db_insert_returning_id(conn, sql, params=()):
     if _is_pg(conn):
@@ -138,9 +154,8 @@ def send_email(to_list, subject, html_body):
         print(f"[EMAIL] Failed: {e}")
         return False
 
-
 def _booking_email_html(patient_name, doctor_name, appt_date, appt_time,
-                         appt_type, notes, status):
+                        appt_type, notes, status):
     type_label   = "Video Consult" if appt_type == "video" else "In-Clinic Visit"
     status_color = {"pending": "#f0a500", "confirmed": "#28a745",
                     "cancelled": "#dc3545"}.get(status, "#666")
@@ -150,38 +165,38 @@ def _booking_email_html(patient_name, doctor_name, appt_date, appt_time,
                 if status == "pending"
                 else "Your appointment has been confirmed. Please be available at the scheduled time.")
     return f"""
-    <div style="font-family:Arial,sans-serif;max-width:600px;margin:auto;
-                border:1px solid #e0e0e0;border-radius:8px;overflow:hidden">
-      <div style="background:#4A90D9;padding:20px;text-align:center">
-        <h2 style="color:white;margin:0">AutexAI Care</h2>
-        <p style="color:#d0e8ff;margin:4px 0">Understanding Your Child Together</p>
-      </div>
-      <div style="padding:24px">
-        <h3 style="color:#4A90D9">Appointment {status.capitalize()}</h3>
-        <table style="width:100%;border-collapse:collapse">
-          <tr><td style="padding:8px;background:#f5f5f5;font-weight:bold;width:40%">Patient</td>
-              <td style="padding:8px">{patient_name}</td></tr>
-          <tr><td style="padding:8px;font-weight:bold">Doctor</td>
-              <td style="padding:8px">{doctor_name}</td></tr>
-          <tr><td style="padding:8px;background:#f5f5f5;font-weight:bold">Date</td>
-              <td style="padding:8px">{appt_date}</td></tr>
-          <tr><td style="padding:8px;font-weight:bold">Time</td>
-              <td style="padding:8px">{appt_time}</td></tr>
-          <tr><td style="padding:8px;background:#f5f5f5;font-weight:bold">Type</td>
-              <td style="padding:8px">{type_label}</td></tr>
-          <tr><td style="padding:8px;font-weight:bold">Status</td>
-              <td style="padding:8px">
-                <span style="color:{status_color};font-weight:bold">{status.upper()}</span>
-              </td></tr>
-          {note_row}
-        </table>
-        <p style="margin-top:20px;color:#666;font-size:13px">{msg_text}</p>
-      </div>
-      <div style="background:#f5f5f5;padding:12px;text-align:center;font-size:11px;color:#999">
-        AutexAI Care — HIPAA Compliant ASD Screening Platform
-      </div>
-    </div>
-    """
+<div style="font-family:Arial,sans-serif;max-width:600px;margin:auto;
+            border:1px solid #e0e0e0;border-radius:8px;overflow:hidden">
+  <div style="background:#4A90D9;padding:20px;text-align:center">
+    <h2 style="color:white;margin:0">AutexAI Care</h2>
+    <p style="color:#d0e8ff;margin:4px 0">Understanding Your Child Together</p>
+  </div>
+  <div style="padding:24px">
+    <h3 style="color:#4A90D9">Appointment {status.capitalize()}</h3>
+    <table style="width:100%;border-collapse:collapse">
+      <tr><td style="padding:8px;background:#f5f5f5;font-weight:bold;width:40%">Patient</td>
+          <td style="padding:8px">{patient_name}</td></tr>
+      <tr><td style="padding:8px;font-weight:bold">Doctor</td>
+          <td style="padding:8px">{doctor_name}</td></tr>
+      <tr><td style="padding:8px;background:#f5f5f5;font-weight:bold">Date</td>
+          <td style="padding:8px">{appt_date}</td></tr>
+      <tr><td style="padding:8px;font-weight:bold">Time</td>
+          <td style="padding:8px">{appt_time}</td></tr>
+      <tr><td style="padding:8px;background:#f5f5f5;font-weight:bold">Type</td>
+          <td style="padding:8px">{type_label}</td></tr>
+      <tr><td style="padding:8px;font-weight:bold">Status</td>
+          <td style="padding:8px">
+            <span style="color:{status_color};font-weight:bold">{status.upper()}</span>
+          </td></tr>
+      {note_row}
+    </table>
+    <p style="margin-top:20px;color:#666;font-size:13px">{msg_text}</p>
+  </div>
+  <div style="background:#f5f5f5;padding:12px;text-align:center;font-size:11px;color:#999">
+    AutexAI Care — HIPAA Compliant ASD Screening Platform
+  </div>
+</div>
+"""
 
 # =============================================================================
 # TRANSLATIONS
@@ -242,7 +257,6 @@ def role_required(role):
 # =============================================================================
 # ROUTES
 # =============================================================================
-
 @app.route('/set_lang/<lang>')
 def set_lang(lang):
     if lang in ['en', 'hi', 'mr']:
@@ -257,7 +271,7 @@ def index():
 def register():
     if request.method == 'POST':
         username = request.form.get('username', '').strip()
-        email    = request.form.get('email', '').strip()
+        email    = request.form.get('email',    '').strip()
         password = request.form.get('password', '')
         confirm  = request.form.get('confirm_password', '')
         role     = request.form.get('role', 'patient')
@@ -304,11 +318,14 @@ def login():
         username = request.form.get('username', '').strip()
         password = request.form.get('password', '')
         hipaa    = request.form.get('hipaa_consent')
+
         if not hipaa:
             flash('HIPAA acknowledgement required', 'error'); return redirect(url_for('login'))
+
         db   = get_db()
         user = db_exec(db, 'SELECT * FROM users WHERE username=?', (username,)).fetchone()
         db.close()
+
         if user and check_password_hash(user['password_hash'], password):
             session['user_id']  = user['id']
             session['username'] = user['username']
@@ -329,7 +346,7 @@ def logout():
 def dashboard():
     db = get_db()
     if session['role'] == 'doctor':
-        preds    = db_exec(db,
+        preds = db_exec(db,
             'SELECT p.*, u.username as uname FROM predictions p '
             'JOIN users u ON p.user_id=u.id ORDER BY p.created_at DESC').fetchall()
         patients = db_exec(db,
@@ -369,8 +386,7 @@ def questionnaire():
     if request.method == 'POST':
         try:
             import base64 as _b64
-
-            raw = {}
+            raw       = {}
             questions = QUESTIONS[lang]
             for q in questions:
                 raw[q['key']] = int(request.form.get(q['key'], 0))
@@ -381,6 +397,10 @@ def questionnaire():
                 raw, config.REPORTS_FOLDER, 'shap')
             top_features = [(f, round(v, 4)) for f, v, _ in contributions]
             # ─────────────────────────────────────────────────────────────────
+
+            # FIX: convert np.float64 values inside top_features to plain Python float
+            # so json.dumps() and psycopg2 don't raise type errors.
+            top_features = [(str(f), float(v)) for f, v in top_features]
 
             # Read SHAP PNG → base64 so it survives Render restarts
             shap_b64 = None
@@ -397,19 +417,32 @@ def questionnaire():
             pred_id = db_insert_returning_id(db,
                 'INSERT INTO predictions'
                 ' (user_id, username, responses, asd_probability, asd_threshold,'
-                '  prediction_label, confidence, top_features, shap_plot,'
-                '  report_path, shap_plot_b64, report_b64)'
+                ' prediction_label, confidence, top_features, shap_plot,'
+                ' report_path, shap_plot_b64, report_b64)'
                 ' VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
-                (session['user_id'], session['username'], json.dumps(raw),
-                 round(prob * 100, 2), round(threshold * 100, 2),
-                 label, confidence, json.dumps(top_features),
-                 os.path.basename(plot_path) if plot_path else None,
-                 report_path,
-                 shap_b64,
-                 report_b64))
+                (
+                    session['user_id'],
+                    session['username'],
+                    # FIX: use NumpyEncoder so any np types inside `raw` are safe
+                    json.dumps(raw, cls=NumpyEncoder),
+                    # FIX: explicitly cast to Python float — psycopg2 rejects np.float64
+                    float(round(prob * 100, 2)),
+                    float(round(threshold * 100, 2)),
+                    # FIX: cast to str — confidence/label may be numpy scalars
+                    str(label),
+                    str(confidence),
+                    # FIX: use NumpyEncoder for top_features list
+                    json.dumps(top_features, cls=NumpyEncoder),
+                    os.path.basename(plot_path) if plot_path else None,
+                    report_path,
+                    shap_b64,
+                    report_b64
+                ))
             db.commit()
             db.close()
+
             return redirect(url_for('results', pred_id=pred_id))
+
         except Exception as e:
             import traceback; traceback.print_exc()
             flash(f'Error: {str(e)}', 'error')
@@ -419,15 +452,14 @@ def questionnaire():
     random.shuffle(questions)
     return render_template('questionnaire.html', questions=questions, lang=lang, t=t)
 
-
 @app.route('/results/<int:pred_id>')
 @login_required
 def results(pred_id):
     import base64 as _b64
-
     db   = get_db()
     pred = db_exec(db, 'SELECT * FROM predictions WHERE id=?', (pred_id,)).fetchone()
     db.close()
+
     if not pred:
         flash('Not found', 'error'); return redirect(url_for('dashboard'))
     if session['role'] == 'patient' and pred['user_id'] != session['user_id']:
@@ -439,19 +471,16 @@ def results(pred_id):
 
     # ── Build a data-URI for the SHAP image ──────────────────────────────────
     shap_data_uri = None
-
     if pred.get('shap_plot_b64'):
         shap_data_uri = 'data:image/png;base64,' + pred['shap_plot_b64']
-
     elif pred.get('shap_plot') and os.path.exists(
             os.path.join(config.REPORTS_FOLDER, pred['shap_plot'])):
         with open(os.path.join(config.REPORTS_FOLDER, pred['shap_plot']), 'rb') as _f:
             b64 = _b64.b64encode(_f.read()).decode('utf-8')
         shap_data_uri = 'data:image/png;base64,' + b64
-
     elif pred.get('responses') and MODEL_OK:
         try:
-            raw = json.loads(pred['responses'])
+            raw          = json.loads(pred['responses'])
             contributions, plot_path = asd_model.generate_shap_plot(
                 raw, config.REPORTS_FOLDER, 'shap_regen')
             if plot_path and os.path.exists(plot_path):
@@ -473,15 +502,14 @@ def results(pred_id):
                            shap_data_uri=shap_data_uri, show_doctors=show_doctors,
                            doctors=RECOMMENDED_DOCTORS, t=t)
 
-
 @app.route('/download/<int:pred_id>')
 @login_required
 def download_report(pred_id):
     import base64 as _b64, io
-
     db   = get_db()
     pred = db_exec(db, 'SELECT * FROM predictions WHERE id=?', (pred_id,)).fetchone()
     db.close()
+
     if not pred:
         flash('Not found', 'error'); return redirect(url_for('dashboard'))
     if session['role'] == 'patient' and pred['user_id'] != session['user_id']:
@@ -508,10 +536,8 @@ def download_report(pred_id):
         try:
             raw          = json.loads(pred['responses'])
             top_features = json.loads(pred['top_features']) if pred['top_features'] else []
-
             _, plot_path = asd_model.generate_shap_plot(
                 raw, config.REPORTS_FOLDER, 'shap_regen')
-
             report_path, report_b64 = _make_pdf_b64(
                 pred['username'], raw,
                 pred['asd_probability'] / 100,
@@ -520,7 +546,6 @@ def download_report(pred_id):
                 pred['confidence'],
                 top_features,
                 plot_path)
-
             try:
                 db2 = get_db()
                 db_exec(db2,
@@ -529,7 +554,6 @@ def download_report(pred_id):
                 db2.commit(); db2.close()
             except Exception:
                 pass
-
             pdf_bytes = _b64.b64decode(report_b64)
             return send_file(
                 io.BytesIO(pdf_bytes),
@@ -538,30 +562,25 @@ def download_report(pred_id):
                 download_name=fname)
         except Exception as e:
             import traceback; traceback.print_exc()
-
     flash('PDF not found and could not be regenerated.', 'error')
     return redirect(url_for('dashboard'))
-
 
 @app.route('/api/available_slots')
 @login_required
 def available_slots():
     doctor_name = request.args.get('doctor_name', '')
     date        = request.args.get('date', '')
-
-    ALL_SLOTS = ['09:00','09:30','10:00','10:30','11:00','11:30','12:00','12:30',
-                 '17:00','17:30','18:00','18:30','19:00','19:30']
-
+    ALL_SLOTS   = ['09:00','09:30','10:00','10:30','11:00','11:30','12:00','12:30',
+                   '17:00','17:30','18:00','18:30','19:00','19:30']
     if not doctor_name or not date:
         return jsonify({'available': ALL_SLOTS})
 
-    db = get_db()
+    db   = get_db()
     rows = db_exec(db,
         "SELECT appt_time FROM appointments "
         "WHERE doctor_name=? AND appt_date=? AND status IN ('pending','confirmed')",
         (doctor_name, date)).fetchall()
     db.close()
-
     booked    = {row['appt_time'] for row in rows}
     available = [s for s in ALL_SLOTS if s not in booked]
     return jsonify({'available': available})
@@ -578,25 +597,23 @@ def doctor_profile(doctor_idx):
 @app.route('/book_appointment', methods=['POST'])
 @login_required
 def book_appointment():
-    doctor_name  = request.form.get('doctor_name', '')
+    doctor_name  = request.form.get('doctor_name',  '')
     doctor_email = request.form.get('doctor_email', '')
-    appt_date    = request.form.get('appt_date', '')
-    appt_time    = request.form.get('appt_time', '')
-    appt_type    = request.form.get('appt_type', 'in_clinic')
-    notes        = request.form.get('notes', '')
+    appt_date    = request.form.get('appt_date',    '')
+    appt_time    = request.form.get('appt_time',    '')
+    appt_type    = request.form.get('appt_type',    'in_clinic')
+    notes        = request.form.get('notes',        '')
 
     if not all([doctor_name, appt_date, appt_time]):
         flash('Please fill in all booking fields.', 'error')
         return redirect(request.referrer or url_for('dashboard'))
 
     db = get_db()
-
     existing = db_exec(db,
         "SELECT id FROM appointments "
         "WHERE doctor_name=? AND appt_date=? AND appt_time=?"
         " AND status IN ('pending','confirmed')",
         (doctor_name, appt_date, appt_time)).fetchone()
-
     if existing:
         flash(f'The {appt_time} slot on {appt_date} is already booked. Please choose another time.', 'error')
         db.close()
@@ -649,7 +666,6 @@ def confirm_appointment(appt_id):
     db = get_db()
     db_exec(db, "UPDATE appointments SET status='confirmed' WHERE id=?", (appt_id,))
     db.commit()
-
     appt        = db_exec(db, 'SELECT * FROM appointments WHERE id=?', (appt_id,)).fetchone()
     patient_row = None
     if appt:
@@ -662,12 +678,11 @@ def confirm_appointment(appt_id):
         if appt['doctor_email']:
             recipients.append(appt['doctor_email'])
         html = _booking_email_html(appt['patient_name'], appt['doctor_name'],
-                                   appt['appt_date'], appt['appt_time'],
-                                   appt['appt_type'], appt['notes'] or '', 'confirmed')
+                                   appt['appt_date'],    appt['appt_time'],
+                                   appt['appt_type'],    appt['notes'] or '', 'confirmed')
         send_email(recipients,
                    f"[AutexAI] Appointment CONFIRMED — {appt['appt_date']} at {appt['appt_time']}",
                    html)
-
     flash('Appointment confirmed. Patient notified by email.', 'success')
     return redirect(request.referrer or url_for('dashboard'))
 
@@ -675,26 +690,26 @@ def confirm_appointment(appt_id):
 # CHATBOT
 # =============================================================================
 CHATBOT_KB = {
-    'what is autism': 'Autism Spectrum Disorder (ASD) is a neurodevelopmental condition that affects communication, social interaction, and behavior.',
-    'asd symptoms': 'Common signs: difficulty with social interaction, repetitive behaviors, sensory sensitivity, delayed speech, insistence on routines.',
+    'what is autism':    'Autism Spectrum Disorder (ASD) is a neurodevelopmental condition that affects communication, social interaction, and behavior.',
+    'asd symptoms':      'Common signs: difficulty with social interaction, repetitive behaviors, sensory sensitivity, delayed speech, insistence on routines.',
     'how is asd diagnosed': 'ASD is diagnosed by specialists through behavioral observations and standardized tests. Our app provides early screening only.',
-    'early signs': 'Before age 3: limited eye contact, not responding to name, delayed speech, repetitive movements.',
-    'treatment': 'Early intervention helps: ABA therapy, speech therapy, occupational therapy, social skills training.',
-    'book appointment': 'Book from Dashboard → Recommended Doctors. Only available (unbooked) slots are shown.',
-    'video call': 'Video consultations available. Book via doctor profile — only open slots shown. Confirmation email sent.',
-    'assessment': '15-question behavioral screening (~5 min). Answer Yes/No about your child.',
-    'results': 'ASD probability %, contributing behaviors, SHAP chart, downloadable PDF report.',
-    'privacy': 'Data encrypted and handled under HIPAA regulations.',
-    'languages': 'Supports English, Hindi, and Marathi.',
-    'doctors': 'Specialized doctors in Pune: Child Psychologists, Pediatric Psychiatrists, Developmental Pediatricians.',
-    'hello': "Hello! I'm the AutexAI Care assistant. Ask me about autism, assessments, or appointments.",
-    'hi': 'Hello! How can I help you today?',
-    'help': 'I can help with: autism symptoms, ASD screening, booking appointments, understanding results.',
-    'what is autexai': 'AutexAI Care is an early ASD screening platform using ensemble ML to assess autism risk.',
-    'how accurate': 'Our ensemble model has ~85%+ accuracy. This is a screening tool — always consult a specialist.',
-    'age': 'Designed for children aged 2–12 years.',
-    'cost': 'Screening is free. Doctor fees vary.',
-    'sensory': 'Sensory sensitivities are common in autism — one of our 15 behavioral indicators.',
+    'early signs':       'Before age 3: limited eye contact, not responding to name, delayed speech, repetitive movements.',
+    'treatment':         'Early intervention helps: ABA therapy, speech therapy, occupational therapy, social skills training.',
+    'book appointment':  'Book from Dashboard → Recommended Doctors. Only available (unbooked) slots are shown.',
+    'video call':        'Video consultations available. Book via doctor profile — only open slots shown. Confirmation email sent.',
+    'assessment':        '15-question behavioral screening (~5 min). Answer Yes/No about your child.',
+    'results':           'ASD probability %, contributing behaviors, SHAP chart, downloadable PDF report.',
+    'privacy':           'Data encrypted and handled under HIPAA regulations.',
+    'languages':         'Supports English, Hindi, and Marathi.',
+    'doctors':           'Specialized doctors in Pune: Child Psychologists, Pediatric Psychiatrists, Developmental Pediatricians.',
+    'hello':             "Hello! I'm the AutexAI Care assistant. Ask me about autism, assessments, or appointments.",
+    'hi':                'Hello! How can I help you today?',
+    'help':              'I can help with: autism symptoms, ASD screening, booking appointments, understanding results.',
+    'what is autexai':   'AutexAI Care is an early ASD screening platform using ensemble ML to assess autism risk.',
+    'how accurate':      'Our ensemble model has ~85%+ accuracy. This is a screening tool — always consult a specialist.',
+    'age':               'Designed for children aged 2–12 years.',
+    'cost':              'Screening is free. Doctor fees vary.',
+    'sensory':           'Sensory sensitivities are common in autism — one of our 15 behavioral indicators.',
 }
 
 def get_chatbot_response(message):
@@ -728,33 +743,36 @@ def chat_api():
 # =============================================================================
 def _make_pdf(username, raw, prob, threshold, label, confidence, top_features, shap_plot, lang='en'):
     from reportlab.lib.pagesizes import letter
-    from reportlab.lib import colors
-    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-    from reportlab.platypus import (SimpleDocTemplate, Table, TableStyle,
-                                     Paragraph, Spacer, Image, HRFlowable)
-    from reportlab.lib.units import inch
+    from reportlab.lib          import colors
+    from reportlab.lib.styles   import getSampleStyleSheet, ParagraphStyle
+    from reportlab.platypus     import (SimpleDocTemplate, Table, TableStyle,
+                                        Paragraph, Spacer, Image, HRFlowable)
+    from reportlab.lib.units    import inch
 
     fname    = f'asd_report_{username}_{int(time.time())}.pdf'
     filepath = os.path.join(config.REPORTS_FOLDER, fname)
     pdf_doc  = SimpleDocTemplate(filepath, pagesize=letter,
-                                  leftMargin=0.75*inch, rightMargin=0.75*inch,
-                                  topMargin=0.75*inch, bottomMargin=0.75*inch)
-    styles  = getSampleStyleSheet(); elems = []
+                                 leftMargin=0.75*inch, rightMargin=0.75*inch,
+                                 topMargin=0.75*inch,  bottomMargin=0.75*inch)
+    styles = getSampleStyleSheet(); elems = []
+
     title_s = ParagraphStyle('T', parent=styles['Heading1'], fontSize=22,
-                              textColor=colors.HexColor('#4A90D9'), alignment=1, spaceAfter=4)
-    sub_s   = ParagraphStyle('S', parent=styles['Normal'], fontSize=10,
-                              textColor=colors.grey, alignment=1, spaceAfter=14)
+                             textColor=colors.HexColor('#4A90D9'), alignment=1, spaceAfter=4)
+    sub_s   = ParagraphStyle('S', parent=styles['Normal'],   fontSize=10,
+                             textColor=colors.grey, alignment=1, spaceAfter=14)
     h2_s    = ParagraphStyle('H2', parent=styles['Heading2'], fontSize=13,
-                              textColor=colors.HexColor('#4A90D9'), spaceBefore=12, spaceAfter=6)
+                             textColor=colors.HexColor('#4A90D9'), spaceBefore=12, spaceAfter=6)
+
     elems.append(Paragraph('AutexAI Care — ASD Screening Report', title_s))
-    elems.append(Paragraph('Understanding Your Child Together  |  HIPAA Compliant', sub_s))
+    elems.append(Paragraph('Understanding Your Child Together | HIPAA Compliant', sub_s))
     elems.append(HRFlowable(width='100%', thickness=1.5,
-                             color=colors.HexColor('#4A90D9'), spaceAfter=10))
+                            color=colors.HexColor('#4A90D9'), spaceAfter=10))
+
     prob_pct = round(prob * 100, 2); thr_pct = round(threshold * 100, 2)
     info = [
         ['Parent/Guardian', username, 'Date', datetime.now().strftime('%Y-%m-%d %H:%M')],
         ['ASD Probability', f'{prob_pct:.2f}%', 'Threshold', f'{thr_pct:.2f}%'],
-        ['Result', label, 'Confidence', confidence],
+        ['Result',          label,               'Confidence', confidence],
     ]
     tbl = Table(info, colWidths=[1.5*inch, 2.5*inch, 1.3*inch, 1.5*inch])
     tbl.setStyle(TableStyle([
@@ -766,6 +784,7 @@ def _make_pdf(username, raw, prob, threshold, label, confidence, top_features, s
         ('BOTTOMPADDING',(0,0),(-1,-1),9),('TOPPADDING',(0,0),(-1,-1),9),
     ]))
     elems.append(tbl); elems.append(Spacer(1, 0.2*inch))
+
     elems.append(Paragraph('What This Means', h2_s))
     if prob_pct >= thr_pct:
         elems.append(Paragraph(
@@ -794,6 +813,7 @@ def _make_pdf(username, raw, prob, threshold, label, confidence, top_features, s
             f'Continue monitoring milestones. If concerns persist, consult a professional.',
             styles['Normal']))
     elems.append(Spacer(1, 0.15*inch))
+
     elems.append(Paragraph('Top Contributing Behaviors', h2_s))
     feat_data = [['#','Behavior','Effect']]
     for i, (fn, fv) in enumerate(top_features[:8], 1):
@@ -808,10 +828,12 @@ def _make_pdf(username, raw, prob, threshold, label, confidence, top_features, s
         ('BOTTOMPADDING',(0,0),(-1,-1),7),('TOPPADDING',(0,0),(-1,-1),7),
     ]))
     elems.append(ft); elems.append(Spacer(1, 0.2*inch))
+
     if shap_plot and os.path.exists(shap_plot):
         elems.append(Paragraph('Behavioral Analysis Chart', h2_s))
         elems.append(Image(shap_plot, width=6.5*inch, height=3.4*inch))
         elems.append(Spacer(1, 0.15*inch))
+
     disc_s = ParagraphStyle('D', parent=styles['Normal'], fontSize=8, textColor=colors.grey)
     elems.append(HRFlowable(width='100%', thickness=0.5, color=colors.grey, spaceAfter=6))
     elems.append(Paragraph(
@@ -821,7 +843,6 @@ def _make_pdf(username, raw, prob, threshold, label, confidence, top_features, s
     pdf_doc.build(elems)
     return filepath
 
-
 def _make_pdf_b64(username, raw, prob, threshold, label, confidence,
                   top_features, shap_plot_path, lang='en'):
     """
@@ -830,32 +851,35 @@ def _make_pdf_b64(username, raw, prob, threshold, label, confidence,
     """
     import io, base64
     from reportlab.lib.pagesizes import letter
-    from reportlab.lib import colors
-    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-    from reportlab.platypus import (SimpleDocTemplate, Table, TableStyle,
-                                     Paragraph, Spacer, Image, HRFlowable)
-    from reportlab.lib.units import inch
+    from reportlab.lib          import colors
+    from reportlab.lib.styles   import getSampleStyleSheet, ParagraphStyle
+    from reportlab.platypus     import (SimpleDocTemplate, Table, TableStyle,
+                                        Paragraph, Spacer, Image, HRFlowable)
+    from reportlab.lib.units    import inch
 
-    buf = io.BytesIO()
+    buf     = io.BytesIO()
     pdf_doc = SimpleDocTemplate(buf, pagesize=letter,
                                 leftMargin=0.75*inch, rightMargin=0.75*inch,
-                                topMargin=0.75*inch, bottomMargin=0.75*inch)
+                                topMargin=0.75*inch,  bottomMargin=0.75*inch)
     styles = getSampleStyleSheet(); elems = []
+
     title_s = ParagraphStyle('T', parent=styles['Heading1'], fontSize=22,
-                              textColor=colors.HexColor('#4A90D9'), alignment=1, spaceAfter=4)
-    sub_s   = ParagraphStyle('S', parent=styles['Normal'], fontSize=10,
-                              textColor=colors.grey, alignment=1, spaceAfter=14)
+                             textColor=colors.HexColor('#4A90D9'), alignment=1, spaceAfter=4)
+    sub_s   = ParagraphStyle('S', parent=styles['Normal'],   fontSize=10,
+                             textColor=colors.grey, alignment=1, spaceAfter=14)
     h2_s    = ParagraphStyle('H2', parent=styles['Heading2'], fontSize=13,
-                              textColor=colors.HexColor('#4A90D9'), spaceBefore=12, spaceAfter=6)
+                             textColor=colors.HexColor('#4A90D9'), spaceBefore=12, spaceAfter=6)
+
     elems.append(Paragraph('AutexAI Care — ASD Screening Report', title_s))
-    elems.append(Paragraph('Understanding Your Child Together  |  HIPAA Compliant', sub_s))
+    elems.append(Paragraph('Understanding Your Child Together | HIPAA Compliant', sub_s))
     elems.append(HRFlowable(width='100%', thickness=1.5,
-                             color=colors.HexColor('#4A90D9'), spaceAfter=10))
+                            color=colors.HexColor('#4A90D9'), spaceAfter=10))
+
     prob_pct = round(prob * 100, 2); thr_pct = round(threshold * 100, 2)
     info = [
         ['Parent/Guardian', username, 'Date', datetime.now().strftime('%Y-%m-%d %H:%M')],
         ['ASD Probability', f'{prob_pct:.2f}%', 'Threshold', f'{thr_pct:.2f}%'],
-        ['Result', label, 'Confidence', confidence],
+        ['Result',          label,               'Confidence', confidence],
     ]
     tbl = Table(info, colWidths=[1.5*inch, 2.5*inch, 1.3*inch, 1.5*inch])
     tbl.setStyle(TableStyle([
@@ -867,6 +891,7 @@ def _make_pdf_b64(username, raw, prob, threshold, label, confidence,
         ('BOTTOMPADDING',(0,0),(-1,-1),9),('TOPPADDING',(0,0),(-1,-1),9),
     ]))
     elems.append(tbl); elems.append(Spacer(1, 0.2*inch))
+
     elems.append(Paragraph('What This Means', h2_s))
     if prob_pct >= thr_pct:
         elems.append(Paragraph(
@@ -895,6 +920,7 @@ def _make_pdf_b64(username, raw, prob, threshold, label, confidence,
             f'Continue monitoring milestones. If concerns persist, consult a professional.',
             styles['Normal']))
     elems.append(Spacer(1, 0.15*inch))
+
     elems.append(Paragraph('Top Contributing Behaviors', h2_s))
     feat_data = [['#','Behavior','Effect']]
     for i, (fn, fv) in enumerate(top_features[:8], 1):
@@ -909,20 +935,23 @@ def _make_pdf_b64(username, raw, prob, threshold, label, confidence,
         ('BOTTOMPADDING',(0,0),(-1,-1),7),('TOPPADDING',(0,0),(-1,-1),7),
     ]))
     elems.append(ft); elems.append(Spacer(1, 0.2*inch))
+
     if shap_plot_path and os.path.exists(shap_plot_path):
         elems.append(Paragraph('Behavioral Analysis Chart (Explainable AI — SHAP)', h2_s))
         elems.append(Image(shap_plot_path, width=6.5*inch, height=3.4*inch))
         elems.append(Spacer(1, 0.15*inch))
+
     disc_s = ParagraphStyle('D', parent=styles['Normal'], fontSize=8, textColor=colors.grey)
     elems.append(HRFlowable(width='100%', thickness=0.5, color=colors.grey, spaceAfter=6))
     elems.append(Paragraph(
         '<b>IMPORTANT:</b> Screening tool only — NOT a medical diagnosis. '
         'Only a licensed specialist can diagnose ASD. All data handled per HIPAA.',
         disc_s))
+
     pdf_doc.build(elems)
 
     pdf_bytes = buf.getvalue()
-    b64 = base64.b64encode(pdf_bytes).decode('utf-8')
+    b64       = base64.b64encode(pdf_bytes).decode('utf-8')
 
     # Also write to disk as local cache (best-effort)
     fname    = f'asd_report_{username}_{int(time.time())}.pdf'
@@ -932,11 +961,9 @@ def _make_pdf_b64(username, raw, prob, threshold, label, confidence,
         with open(filepath, 'wb') as fh:
             fh.write(pdf_bytes)
     except Exception:
-        filepath = None   # disk write failed — that's OK, we have b64
+        filepath = None  # disk write failed — that's OK, we have b64
 
     return filepath, b64
 
-
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=5000)
-
