@@ -386,28 +386,54 @@ def questionnaire():
 
     if request.method == 'POST':
         try:
+            # ─────────────────────────────────────────────────────────────────────────────
+# PATCH 2  ·  questionnaire()  POST block — replace lines ~387-417
+# ─────────────────────────────────────────────────────────────────────────────
+ 
+# REPLACE the existing questionnaire() POST try block with:
+ 
+
+    if request.method == 'POST':
+        try:
+            import base64 as _b64
+ 
             raw = {}
             questions = QUESTIONS[lang]
             for q in questions:
                 raw[q['key']] = int(request.form.get(q['key'], 0))
-
+ 
+            # ── MODEL LOGIC — UNTOUCHED ───────────────────────────────────────
             prob, threshold, label, confidence = asd_model.predict(raw)
             contributions, plot_path = asd_model.generate_shap_plot(
                 raw, config.REPORTS_FOLDER, 'shap')
             top_features = [(f, round(v, 4)) for f, v, _ in contributions]
-
-            report_path = _make_pdf(session['username'], raw, prob, threshold,
-                                    label, confidence, top_features, plot_path, lang)
+            # ─────────────────────────────────────────────────────────────────
+ 
+            # Read SHAP PNG → base64 so it survives Render restarts
+            shap_b64 = None
+            if plot_path and os.path.exists(plot_path):
+                with open(plot_path, 'rb') as _f:
+                    shap_b64 = _b64.b64encode(_f.read()).decode('utf-8')
+ 
+            # Build PDF in-memory → base64 (also writes to disk as cache)
+            report_path, report_b64 = _make_pdf_b64(
+                session['username'], raw, prob, threshold,
+                label, confidence, top_features, plot_path, lang)
+ 
             db = get_db()
             pred_id = db_insert_returning_id(db,
                 'INSERT INTO predictions'
                 ' (user_id, username, responses, asd_probability, asd_threshold,'
-                '  prediction_label, confidence, top_features, shap_plot, report_path)'
-                ' VALUES (?,?,?,?,?,?,?,?,?,?)',
+                '  prediction_label, confidence, top_features, shap_plot,'
+                '  report_path, shap_plot_b64, report_b64)'
+                ' VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
                 (session['user_id'], session['username'], json.dumps(raw),
                  round(prob * 100, 2), round(threshold * 100, 2),
                  label, confidence, json.dumps(top_features),
-                 os.path.basename(plot_path), report_path))
+                 os.path.basename(plot_path) if plot_path else None,
+                 report_path,
+                 shap_b64,
+                 report_b64))
             db.commit()
             db.close()
             return redirect(url_for('results', pred_id=pred_id))
@@ -415,15 +441,19 @@ def questionnaire():
             import traceback; traceback.print_exc()
             flash(f'Error: {str(e)}', 'error')
             return redirect(url_for('questionnaire'))
+
     # ─────────────────────────────────────────────────────────────────────────
 
     questions = list(QUESTIONS[lang])
     random.shuffle(questions)
     return render_template('questionnaire.html', questions=questions, lang=lang, t=t)
 
+
 @app.route('/results/<int:pred_id>')
 @login_required
 def results(pred_id):
+    import base64 as _b64
+ 
     db   = get_db()
     pred = db_exec(db, 'SELECT * FROM predictions WHERE id=?', (pred_id,)).fetchone()
     db.close()
@@ -431,17 +461,59 @@ def results(pred_id):
         flash('Not found', 'error'); return redirect(url_for('dashboard'))
     if session['role'] == 'patient' and pred['user_id'] != session['user_id']:
         flash('Access denied', 'error'); return redirect(url_for('dashboard'))
+ 
     top_features = json.loads(pred['top_features']) if pred['top_features'] else []
     top_labeled  = [(FEATURE_LABELS.get(f, f), v) for f, v in top_features]
-    shap_img     = pred['shap_plot'] or None
     show_doctors = pred['asd_probability'] >= pred['asd_threshold']
+ 
+    # ── Build a data-URI for the SHAP image ──────────────────────────────────
+    # Priority 1: base64 stored in DB  (works on Render after any restart)
+    # Priority 2: file still exists on disk (dev / same-instance)
+    # Priority 3: regenerate on-the-fly from stored responses
+    shap_data_uri = None
+ 
+    if pred.get('shap_plot_b64'):
+        shap_data_uri = 'data:image/png;base64,' + pred['shap_plot_b64']
+ 
+    elif pred.get('shap_plot') and os.path.exists(
+            os.path.join(config.REPORTS_FOLDER, pred['shap_plot'])):
+        with open(os.path.join(config.REPORTS_FOLDER, pred['shap_plot']), 'rb') as _f:
+            b64 = _b64.b64encode(_f.read()).decode('utf-8')
+        shap_data_uri = 'data:image/png;base64,' + b64
+ 
+    elif pred.get('responses') and MODEL_OK:
+        try:
+            raw = json.loads(pred['responses'])
+            contributions, plot_path = asd_model.generate_shap_plot(
+                raw, config.REPORTS_FOLDER, 'shap_regen')
+            if plot_path and os.path.exists(plot_path):
+                with open(plot_path, 'rb') as _f:
+                    b64 = _b64.b64encode(_f.read()).decode('utf-8')
+                shap_data_uri = 'data:image/png;base64,' + b64
+                # Persist b64 back to DB so next load is instant
+                try:
+                    db2 = get_db()
+                    db_exec(db2,
+                        'UPDATE predictions SET shap_plot_b64=? WHERE id=?',
+                        (b64, pred_id))
+                    db2.commit(); db2.close()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    # ─────────────────────────────────────────────────────────────────────────
+ 
     return render_template('results.html', pred=pred, top_features=top_labeled,
-                           shap_img=shap_img, show_doctors=show_doctors,
+                           shap_data_uri=shap_data_uri, show_doctors=show_doctors,
                            doctors=RECOMMENDED_DOCTORS, t=t)
+
+ 
 
 @app.route('/download/<int:pred_id>')
 @login_required
 def download_report(pred_id):
+    import base64 as _b64, io
+ 
     db   = get_db()
     pred = db_exec(db, 'SELECT * FROM predictions WHERE id=?', (pred_id,)).fetchone()
     db.close()
@@ -449,25 +521,64 @@ def download_report(pred_id):
         flash('Not found', 'error'); return redirect(url_for('dashboard'))
     if session['role'] == 'patient' and pred['user_id'] != session['user_id']:
         flash('Access denied', 'error'); return redirect(url_for('dashboard'))
-    rp = pred['report_path']
+ 
+    fname = f'asd_report_{pred["username"]}_{pred_id}.pdf'
+ 
+    # Priority 1: base64 stored in DB  (always available on Render)
+    if pred.get('report_b64'):
+        pdf_bytes = _b64.b64decode(pred['report_b64'])
+        return send_file(
+            io.BytesIO(pdf_bytes),
+            mimetype='application/pdf',
+            as_attachment=True,
+            download_name=fname)
+ 
+    # Priority 2: file still on disk (dev / same Render instance)
+    rp = pred.get('report_path')
     if rp and os.path.exists(rp):
-        return send_file(rp, as_attachment=True)
-    flash('PDF not found', 'error')
+        return send_file(rp, as_attachment=True, download_name=fname)
+ 
+    # Priority 3: regenerate from stored responses
+    if pred.get('responses') and MODEL_OK:
+        try:
+            raw          = json.loads(pred['responses'])
+            top_features = json.loads(pred['top_features']) if pred['top_features'] else []
+ 
+            # Regenerate SHAP plot for the PDF
+            _, plot_path = asd_model.generate_shap_plot(
+                raw, config.REPORTS_FOLDER, 'shap_regen')
+ 
+            report_path, report_b64 = _make_pdf_b64(
+                pred['username'], raw,
+                pred['asd_probability'] / 100,
+                pred['asd_threshold']   / 100,
+                pred['prediction_label'],
+                pred['confidence'],
+                top_features,
+                plot_path)
+ 
+            # Persist b64 back to DB so future downloads are instant
+            try:
+                db2 = get_db()
+                db_exec(db2,
+                    'UPDATE predictions SET report_b64=?, report_path=? WHERE id=?',
+                    (report_b64, report_path, pred_id))
+                db2.commit(); db2.close()
+            except Exception:
+                pass
+ 
+            pdf_bytes = _b64.b64decode(report_b64)
+            return send_file(
+                io.BytesIO(pdf_bytes),
+                mimetype='application/pdf',
+                as_attachment=True,
+                download_name=fname)
+        except Exception as e:
+            import traceback; traceback.print_exc()
+ 
+    flash('PDF not found and could not be regenerated.', 'error')
     return redirect(url_for('dashboard'))
 
-@app.route('/doctor/<int:doctor_idx>')
-@login_required
-def doctor_profile(doctor_idx):
-    if doctor_idx < 0 or doctor_idx >= len(RECOMMENDED_DOCTORS):
-        flash('Doctor not found', 'error'); return redirect(url_for('dashboard'))
-    doc = RECOMMENDED_DOCTORS[doctor_idx]
-    db = get_db()
-    appointments = db_exec(db,
-        'SELECT * FROM appointments WHERE doctor_name=? ORDER BY appt_date ASC',
-        (doc['name'],)).fetchall()
-    db.close()
-    return render_template('doctor_profile.html', doc=doc, doc_idx=doctor_idx,
-                           appointments=appointments, t=t)
 
 @app.route('/api/available_slots')
 @login_required
@@ -737,6 +848,120 @@ def _make_pdf(username, raw, prob, threshold, label, confidence, top_features, s
         disc_s))
     pdf_doc.build(elems)
     return filepath
-
+# ---------- helper: PDF → base64 (in-memory, no disk required) ----------
+def _make_pdf_b64(username, raw, prob, threshold, label, confidence,
+                  top_features, shap_plot_path, lang='en'):
+    """
+    Identical to _make_pdf() but writes to a BytesIO buffer and returns
+    (filepath, base64_string).  The file is still written to disk as a
+    local cache; the b64 string is what gets stored in Supabase/PostgreSQL.
+    """
+    import io, base64
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib import colors
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.platypus import (SimpleDocTemplate, Table, TableStyle,
+                                     Paragraph, Spacer, Image, HRFlowable)
+    from reportlab.lib.units import inch
+ 
+    buf = io.BytesIO()
+    pdf_doc = SimpleDocTemplate(buf, pagesize=letter,
+                                leftMargin=0.75*inch, rightMargin=0.75*inch,
+                                topMargin=0.75*inch, bottomMargin=0.75*inch)
+    styles = getSampleStyleSheet(); elems = []
+    title_s = ParagraphStyle('T', parent=styles['Heading1'], fontSize=22,
+                              textColor=colors.HexColor('#4A90D9'), alignment=1, spaceAfter=4)
+    sub_s   = ParagraphStyle('S', parent=styles['Normal'], fontSize=10,
+                              textColor=colors.grey, alignment=1, spaceAfter=14)
+    h2_s    = ParagraphStyle('H2', parent=styles['Heading2'], fontSize=13,
+                              textColor=colors.HexColor('#4A90D9'), spaceBefore=12, spaceAfter=6)
+    elems.append(Paragraph('AutexAI Care — ASD Screening Report', title_s))
+    elems.append(Paragraph('Understanding Your Child Together  |  HIPAA Compliant', sub_s))
+    elems.append(HRFlowable(width='100%', thickness=1.5,
+                             color=colors.HexColor('#4A90D9'), spaceAfter=10))
+    prob_pct = round(prob * 100, 2); thr_pct = round(threshold * 100, 2)
+    info = [
+        ['Parent/Guardian', username, 'Date', datetime.now().strftime('%Y-%m-%d %H:%M')],
+        ['ASD Probability', f'{prob_pct:.2f}%', 'Threshold', f'{thr_pct:.2f}%'],
+        ['Result', label, 'Confidence', confidence],
+    ]
+    tbl = Table(info, colWidths=[1.5*inch, 2.5*inch, 1.3*inch, 1.5*inch])
+    tbl.setStyle(TableStyle([
+        ('BACKGROUND',(0,0),(0,-1),colors.HexColor('#4A90D9')),
+        ('BACKGROUND',(2,0),(2,-1),colors.HexColor('#4A90D9')),
+        ('TEXTCOLOR',(0,0),(0,-1),colors.white),('TEXTCOLOR',(2,0),(2,-1),colors.white),
+        ('FONTNAME',(0,0),(-1,-1),'Helvetica'),('FONTSIZE',(0,0),(-1,-1),10),
+        ('GRID',(0,0),(-1,-1),0.5,colors.grey),
+        ('BOTTOMPADDING',(0,0),(-1,-1),9),('TOPPADDING',(0,0),(-1,-1),9),
+    ]))
+    elems.append(tbl); elems.append(Spacer(1, 0.2*inch))
+    elems.append(Paragraph('What This Means', h2_s))
+    if prob_pct >= thr_pct:
+        elems.append(Paragraph(
+            f'ASD probability <b>{prob_pct:.2f}%</b> above threshold <b>{thr_pct:.2f}%</b>. '
+            f'<b>Please consult a specialist.</b> Early intervention makes a significant difference!',
+            styles['Normal'])); elems.append(Spacer(1, 0.15*inch))
+        elems.append(Paragraph('Recommended Specialists in Pune', h2_s))
+        doc_data = [['Doctor','Hospital','Contact']]
+        for d in RECOMMENDED_DOCTORS:
+            doc_data.append([f"{d['name']}\n{d['specialty']}",
+                             f"{d['hospital']}\n{d['address']}",
+                             f"{d['phone']}\n{d['email']}"])
+        dt = Table(doc_data, colWidths=[2.2*inch, 2.8*inch, 1.6*inch])
+        dt.setStyle(TableStyle([
+            ('BACKGROUND',(0,0),(-1,0),colors.HexColor('#4A90D9')),
+            ('TEXTCOLOR',(0,0),(-1,0),colors.white),
+            ('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),
+            ('FONTSIZE',(0,0),(-1,-1),9),('GRID',(0,0),(-1,-1),0.4,colors.grey),
+            ('VALIGN',(0,0),(-1,-1),'TOP'),
+            ('BOTTOMPADDING',(0,0),(-1,-1),8),('TOPPADDING',(0,0),(-1,-1),8),
+        ]))
+        elems.append(dt); elems.append(Spacer(1, 0.15*inch))
+    else:
+        elems.append(Paragraph(
+            f'ASD probability <b>{prob_pct:.2f}%</b> below threshold. Fewer ASD indicators present. '
+            f'Continue monitoring milestones. If concerns persist, consult a professional.',
+            styles['Normal']))
+    elems.append(Spacer(1, 0.15*inch))
+    elems.append(Paragraph('Top Contributing Behaviors', h2_s))
+    feat_data = [['#','Behavior','Effect']]
+    for i, (fn, fv) in enumerate(top_features[:8], 1):
+        feat_data.append([str(i), FEATURE_LABELS.get(fn, fn),
+                          'Increases ASD indicators' if fv >= 0 else 'Decreases ASD indicators'])
+    ft = Table(feat_data, colWidths=[0.4*inch, 4*inch, 2.2*inch])
+    ft.setStyle(TableStyle([
+        ('BACKGROUND',(0,0),(-1,0),colors.HexColor('#7FB069')),
+        ('TEXTCOLOR',(0,0),(-1,0),colors.white),
+        ('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),
+        ('FONTSIZE',(0,0),(-1,-1),9),('GRID',(0,0),(-1,-1),0.4,colors.grey),
+        ('BOTTOMPADDING',(0,0),(-1,-1),7),('TOPPADDING',(0,0),(-1,-1),7),
+    ]))
+    elems.append(ft); elems.append(Spacer(1, 0.2*inch))
+    if shap_plot_path and os.path.exists(shap_plot_path):
+        elems.append(Paragraph('Behavioral Analysis Chart (Explainable AI — SHAP)', h2_s))
+        elems.append(Image(shap_plot_path, width=6.5*inch, height=3.4*inch))
+        elems.append(Spacer(1, 0.15*inch))
+    disc_s = ParagraphStyle('D', parent=styles['Normal'], fontSize=8, textColor=colors.grey)
+    elems.append(HRFlowable(width='100%', thickness=0.5, color=colors.grey, spaceAfter=6))
+    elems.append(Paragraph(
+        '<b>IMPORTANT:</b> Screening tool only — NOT a medical diagnosis. '
+        'Only a licensed specialist can diagnose ASD. All data handled per HIPAA.',
+        disc_s))
+    pdf_doc.build(elems)
+ 
+    pdf_bytes = buf.getvalue()
+    b64 = base64.b64encode(pdf_bytes).decode('utf-8')
+ 
+    # Also write to disk as local cache (best-effort)
+    fname    = f'asd_report_{username}_{int(time.time())}.pdf'
+    filepath = os.path.join(config.REPORTS_FOLDER, fname)
+    try:
+        os.makedirs(config.REPORTS_FOLDER, exist_ok=True)
+        with open(filepath, 'wb') as fh:
+            fh.write(pdf_bytes)
+    except Exception:
+        filepath = None   # disk write failed — that's OK, we have b64
+ 
+    return filepath, b64
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=5000)
