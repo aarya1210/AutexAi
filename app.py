@@ -592,13 +592,8 @@ def doctor_profile(doctor_idx):
         flash('Doctor not found.', 'error')
         return redirect(url_for('dashboard'))
     doc = RECOMMENDED_DOCTORS[doctor_idx]
-    db = get_db()
-    appointments = db_exec(db,
-        'SELECT * FROM appointments WHERE doctor_name=? ORDER BY appt_date ASC, appt_time ASC',
-        (doc['name'],)).fetchall()
-    db.close()
     return render_template('doctor_profile.html', doc=doc, doctor_idx=doctor_idx,
-                           appointments=appointments, t=t)
+                           appointments=[], t=t)
 
 @app.route('/book_appointment', methods=['POST'])
 @login_required
