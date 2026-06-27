@@ -598,7 +598,7 @@ def doctor_profile(doctor_idx):
         (doc['name'],)).fetchall()
     db.close()
     return render_template('doctor_profile.html', doc=doc, doctor_idx=doctor_idx,
-                           appointments=appointments)
+                           appointments=appointments, t=t)
 
 @app.route('/book_appointment', methods=['POST'])
 @login_required
@@ -648,8 +648,13 @@ def book_appointment():
     if recipients:
         html = _booking_email_html(session['username'], doctor_name,
                                    appt_date, appt_time, appt_type, notes, 'pending')
-        send_email(recipients,
-                   f"[AutexAI] Appointment Booked — {appt_date} at {appt_time}", html)
+        threading.Thread(
+            target=send_email,
+            args=(recipients,
+                  f"[AutexAI] Appointment Booked — {appt_date} at {appt_time}",
+                  html),
+            daemon=True
+        ).start()
 
     flash(f'Appointment booked with {doctor_name} on {appt_date} at {appt_time}!'
           f' Confirmation email sent.', 'success')
