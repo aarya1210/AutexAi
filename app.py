@@ -592,7 +592,13 @@ def doctor_profile(doctor_idx):
         flash('Doctor not found.', 'error')
         return redirect(url_for('dashboard'))
     doc = RECOMMENDED_DOCTORS[doctor_idx]
-    return render_template('doctor_profile.html', doc=doc, doctor_idx=doctor_idx)
+    db = get_db()
+    appointments = db_exec(db,
+        'SELECT * FROM appointments WHERE doctor_name=? ORDER BY appt_date ASC, appt_time ASC',
+        (doc['name'],)).fetchall()
+    db.close()
+    return render_template('doctor_profile.html', doc=doc, doctor_idx=doctor_idx,
+                           appointments=appointments)
 
 @app.route('/book_appointment', methods=['POST'])
 @login_required
@@ -619,6 +625,10 @@ def book_appointment():
         db.close()
         return redirect(request.referrer or url_for('dashboard'))
 
+    # Fetch patient email before INSERT so we don't need the connection after commit
+    patient_row = db_exec(db, 'SELECT email FROM users WHERE id=?',
+                          (session['user_id'],)).fetchone()
+
     db_exec(db,
         'INSERT INTO appointments'
         ' (patient_id, patient_name, doctor_name, doctor_email,'
@@ -628,9 +638,6 @@ def book_appointment():
          doctor_name, doctor_email,
          appt_date, appt_time, appt_type, notes, 'pending'))
     db.commit()
-
-    patient_row = db_exec(db, 'SELECT email FROM users WHERE id=?',
-                          (session['user_id'],)).fetchone()
     db.close()
 
     recipients = []
